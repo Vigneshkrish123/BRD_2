@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "transcript-to-brd"
+version = "0.1.0"
+description = "Teams meeting transcript to BRD (.docx) generator"
+authors = ["Boomi"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+openai = "^1.30.0"
+azure-identity = "^1.17.0"
+azure-keyvault-secrets = "^4.8.0"
+streamlit = "^1.35.0"
+loguru = "^0.7.2"
+python-dotenv = "^1.0.0"
+python-docx = "^1.1.0"
+tiktoken = "^0.7.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
