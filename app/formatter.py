@@ -1,6 +1,5 @@
-import os
+import io
 import datetime
-from pathlib import Path
 from loguru import logger
 
 from docx import Document
@@ -278,19 +277,22 @@ def _section_action_items(doc, brd):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def format_docx(brd_data: dict, output_path: str) -> str:
+def format_docx(brd_data: dict) -> bytes:
     """
-    Convert a BRD JSON dict into a styled .docx file.
+    Convert a BRD JSON dict into a styled .docx and return the raw bytes.
+
+    Nothing is written to disk — the caller receives bytes directly and passes
+    them to st.download_button(). This eliminates the outputs/ directory entirely.
 
     Args:
-        brd_data    : output of generator.generate()
-        output_path : destination path for the .docx
+        brd_data: output of generator.generate() after model_dump()
 
     Returns:
-        Absolute path to the created file.
-    """
-    os.makedirs(Path(output_path).parent, exist_ok=True)
+        Raw .docx bytes ready for st.download_button(data=...).
 
+    Raises:
+        RuntimeError: if document construction fails, with a clean message.
+    """
     doc = Document()
     _setup_styles(doc)
 
@@ -302,19 +304,25 @@ def format_docx(brd_data: dict, output_path: str) -> str:
 
     logger.info("Formatter | building document...")
 
-    _title_page(doc, brd_data)
-    _section_exec_summary(doc, brd_data)
-    _section_overview(doc, brd_data)
-    _section_scope(doc, brd_data)
-    _section_stakeholders(doc, brd_data)
-    _section_objectives(doc, brd_data)
-    _section_fr(doc, brd_data)
-    _section_nfr(doc, brd_data)
-    _section_assumptions(doc, brd_data)
-    _section_risks(doc, brd_data)
-    _section_open_questions(doc, brd_data)
-    _section_action_items(doc, brd_data)
+    try:
+        _title_page(doc, brd_data)
+        _section_exec_summary(doc, brd_data)
+        _section_overview(doc, brd_data)
+        _section_scope(doc, brd_data)
+        _section_stakeholders(doc, brd_data)
+        _section_objectives(doc, brd_data)
+        _section_fr(doc, brd_data)
+        _section_nfr(doc, brd_data)
+        _section_assumptions(doc, brd_data)
+        _section_risks(doc, brd_data)
+        _section_open_questions(doc, brd_data)
+        _section_action_items(doc, brd_data)
+    except Exception as e:
+        logger.error(f"Formatter | document build failed: {e}")
+        raise RuntimeError(f"Document generation failed: {e}") from e
 
-    doc.save(output_path)
-    logger.info(f"Formatter | saved → {output_path}")
-    return str(Path(output_path).resolve())
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    logger.info("Formatter | document built successfully")
+    return buffer.getvalue()

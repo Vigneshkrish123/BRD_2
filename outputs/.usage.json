@@ -1,0 +1,38 @@
+{
+  "date": "2026-05-24",
+  "requests": [
+    {
+      "ts": 1779604847.5426662,
+      "input_tokens": 954,
+      "output_tokens": 106,
+      "cost_usd": 0.000207
+    },
+    {
+      "ts": 1779605076.712685,
+      "input_tokens": 639,
+      "output_tokens": 396,
+      "cost_usd": 0.000333
+    },
+    {
+      "ts": 1779605102.0136364,
+      "input_tokens": 1172,
+      "output_tokens": 772,
+      "cost_usd": 0.000639
+    },
+    {
+      "ts": 1779608615.5151951,
+      "user_id": "User-5928abce",
+      "input_tokens": 639,
+      "output_tokens": 386,
+      "cost_usd": 0.000327
+    },
+    {
+      "ts": 1779608630.2763314,
+      "user_id": "User-5928abce",
+      "input_tokens": 1162,
+      "output_tokens": 864,
+      "cost_usd": 0.000693
+    }
+  ],
+  "total_usd": 0.002199
+}

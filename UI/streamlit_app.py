@@ -1,12 +1,12 @@
 import os
 import re
+import subprocess
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 
 import defusedxml
-defusedxml.defuse_stdlib()          # Patches xml.etree, xml.dom, xml.sax globally.
-                                    # Must run before any XML-capable import (python-docx, etc.)
+defusedxml.defuse_stdlib()
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -19,20 +19,13 @@ from app.cleaner import clean_transcript
 from app.extractor import extract
 from app.generator import generate
 from app.formatter import format_docx
-from app.cost_guard import (
-    check_input_size,
-    check_rate_limit,
-    check_daily_budget,
-    get_summary,
-)
+from app.cost_guard import check_input_size
 
-# ── Upload size caps (zip-bomb + DoS guards) ─────────────────────────────────
-# These fire before any processing — including before the LLM token guard in
-# cost_guard.py — so they protect against unauthenticated-path abuse too.
+# ── Upload size caps ──────────────────────────────────────────────────────────
 
-_MAX_UPLOAD_BYTES  = 5 * 1024 * 1024   # 5 MB raw — matches --server.maxUploadSize
-_MAX_DECODED_CHARS = 2 * 1024 * 1024   # 2 M chars decoded (well above any real transcript)
-_MAX_EXPAND_RATIO  = 10                 # decoded / raw ratio; >10× means binary/compressed
+_MAX_UPLOAD_BYTES  = 5 * 1024 * 1024
+_MAX_DECODED_CHARS = 2 * 1024 * 1024
+_MAX_EXPAND_RATIO  = 10
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -42,22 +35,48 @@ st.set_page_config(
     layout="centered",
 )
 
-# ── Sidebar — cost dashboard ──────────────────────────────────────────────────
+# ── Username resolution ───────────────────────────────────────────────────────
+# Priority: Easy Auth header (App Service) → az CLI (local) → session fallback
+
+def _get_username() -> str:
+    # 1. Easy Auth (Azure App Service with Entra ID login wall)
+    try:
+        name = st.context.headers.get("X-MS-CLIENT-PRINCIPAL-NAME", "")
+        if name:
+            return name
+    except Exception:
+        pass
+
+    # 2. az CLI session (local development)
+    try:
+        result = subprocess.run(
+            ["az", "account", "show", "--query", "user.name", "-o", "tsv"],
+            capture_output=True, text=True, timeout=5
+        )
+        name = result.stdout.strip()
+        if name:
+            return name
+    except Exception:
+        pass
+
+    # 3. Session fallback — unique per browser tab
+    if "session_id" not in st.session_state:
+        st.session_state["session_id"] = str(uuid.uuid4())[:8]
+    return f"User-{st.session_state['session_id']}"
+
+
+if "username" not in st.session_state:
+    st.session_state["username"] = _get_username()
+
+username = st.session_state["username"]
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("💰 Usage Today")
-    summary = get_summary()
-    budget_pct = min(summary["spend_today_usd"] / summary["budget_usd"], 1.0)
-    st.progress(budget_pct)
-    col1, col2 = st.columns(2)
-    col1.metric("Spent",     f"${summary['spend_today_usd']:.4f}")
-    col2.metric("Remaining", f"${summary['remaining_usd']:.4f}")
-    st.caption(
-        f"Daily budget: ${summary['budget_usd']:.2f}  |  "
-        f"Runs today: {summary['runs_today']}"
-    )
+    st.header("📄 BRD Agent")
     st.divider()
-    st.caption("Limits: 10 runs/hour · 20k tokens/input · $5.00/day")
+    st.caption(f"👤 {username}")
+    st.caption(f"Limit: 20k tokens/input")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -65,8 +84,6 @@ st.title("📄 Transcript to BRD")
 st.divider()
 
 # ── Authentication gate ───────────────────────────────────────────────────────
-# Auth runs once per session and is cached in session_state.
-# Nothing below this block is visible until auth passes.
 
 if "auth" not in st.session_state:
     with st.status("🔐 Authenticating with Azure...", expanded=True) as auth_status:
@@ -97,7 +114,6 @@ if not auth.ok:
     )
     st.stop()
 
-# Auth passed — show authenticated badge and continue
 st.success("🔐 Authenticated with Azure")
 
 # ── File upload ───────────────────────────────────────────────────────────────
@@ -114,8 +130,9 @@ if not uploaded_file:
     st.info("Waiting for a transcript file.")
     st.stop()
 
-# ── Size guards (must run before any content processing) ─────────────────────
-raw_bytes = uploaded_file.getvalue()   # reads once into memory; no re-read needed
+# ── Size guards ───────────────────────────────────────────────────────────────
+
+raw_bytes = uploaded_file.getvalue()
 
 if len(raw_bytes) > _MAX_UPLOAD_BYTES:
     st.error(
@@ -137,7 +154,7 @@ _expand = len(raw_text) / max(len(raw_bytes), 1)
 if _expand > _MAX_EXPAND_RATIO:
     st.error(
         f"File expansion ratio {_expand:.1f}× exceeds limit ({_MAX_EXPAND_RATIO}×). "
-        "Possible compressed or binary content masquerading as plain text."
+        "Possible compressed or binary content."
     )
     st.stop()
 
@@ -156,12 +173,9 @@ st.divider()
 
 if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
-    # Pre-flight cost guards
     try:
-        check_rate_limit()
-        check_daily_budget()
         token_count = check_input_size(raw_text)
-    except (ValueError, RuntimeError) as e:
+    except ValueError as e:
         st.error(str(e))
         st.stop()
 
@@ -170,7 +184,7 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
     with st.status("Running pipeline...", expanded=True) as status:
 
-        st.write(f"🔒 Guards passed — {token_count:,} tokens")
+        st.write(f"🔒 Input ok — {token_count:,} tokens")
 
         st.write("🧹 Cleaning transcript...")
         try:
@@ -205,12 +219,7 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
         st.write("📄 Formatting .docx...")
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-                tmp_path = tmp.name
-            format_docx(brd, tmp_path)
-            with open(tmp_path, "rb") as f:
-                docx_bytes = f.read()
-            os.unlink(tmp_path)
+            docx_bytes = format_docx(brd)
         except Exception as e:
             st.error(f"Formatter failed: {e}")
             st.stop()
@@ -218,18 +227,9 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
         status.update(label="✅ Done!", state="complete", expanded=False)
 
-    updated     = get_summary()
-    run_cost    = updated["spend_today_usd"] - summary["spend_today_usd"]
-    st.info(
-        f"💰 This run cost approx. **${run_cost:.4f}** | "
-        f"Daily total: **${updated['spend_today_usd']:.4f}** / ${updated['budget_usd']:.2f}"
-    )
-
-    project  = brd.get("document_info", {}).get("project_name", "BRD")
-    # Sanitize: strip everything except word chars, spaces, hyphens.
-    # LLM output goes directly here — must not allow path traversal or shell chars.
+    project      = brd.get("document_info", {}).get("project_name", "BRD")
     safe_project = re.sub(r"[^\w\s\-]", "", project).strip() or "BRD"
-    filename = f"{safe_project.replace(' ', '_')}_BRD.docx"
+    filename     = f"{safe_project.replace(' ', '_')}_BRD.docx"
 
     st.download_button(
         label="⬇️ Download BRD (.docx)",
