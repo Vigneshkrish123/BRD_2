@@ -2,6 +2,7 @@ import json
 import time
 import datetime
 import openai
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from openai import AzureOpenAI
 from loguru import logger
@@ -11,7 +12,8 @@ from app.sanitizer import validate_brd
 
 _MAX_RETRIES   = 3
 _BASE_DELAY    = 2   # seconds — doubles on each attempt (2s, 4s, 8s)
-_UC_BATCH_SIZE = 3   # use cases per generation call — keeps output well within 16k tokens
+_UC_BATCH_SIZE = 3   # use cases per generation call
+_UC_MAX_WORKERS = 5  # parallel UC batch calls (stay well under 150k TPM)
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -161,43 +163,79 @@ def generate(
         if on_progress:
             on_progress(msg)
 
-    # ── Phase 1 ───────────────────────────────────────────────────────────────
-    _notify("📝 Generating document structure (intro, scope, objectives, NFRs)...")
-    shell = _generate_document_shell(extracted_data, client, deployment)
-    shell["use_cases"] = []
-
-    # ── Phase 2 ───────────────────────────────────────────────────────────────
-    uc_sketches     = extracted_data.get("use_cases", [])
-    project_name    = extracted_data.get("project_name", "TBD")
+    uc_sketches      = extracted_data.get("use_cases", [])
+    project_name     = extracted_data.get("project_name", "TBD")
     business_context = extracted_data.get("business_context", "")
-    total_ucs       = len(uc_sketches)
-    total_batches   = max(1, (total_ucs + _UC_BATCH_SIZE - 1) // _UC_BATCH_SIZE)
+    total_ucs        = len(uc_sketches)
+    total_batches    = max(1, (total_ucs + _UC_BATCH_SIZE - 1) // _UC_BATCH_SIZE)
 
     _notify(
-        f"📋 Generating {total_ucs} use case(s) in {total_batches} batch(es) "
-        f"of up to {_UC_BATCH_SIZE}..."
+        f"📝 Generating in parallel: document structure + "
+        f"{total_ucs} use case(s) in {total_batches} batch(es)..."
     )
 
-    all_use_cases: list = []
-    for batch_num, i in enumerate(range(0, total_ucs, _UC_BATCH_SIZE), start=1):
-        batch   = uc_sketches[i:i + _UC_BATCH_SIZE]
-        start   = i + 1
-        end     = min(i + _UC_BATCH_SIZE, total_ucs)
-        _notify(f"  ↳ Batch {batch_num}/{total_batches}: UC_{start:02d}–UC_{end:02d} ({len(batch)} use cases)")
+    # Build UC batch descriptors
+    batches = [
+        {
+            "batch_num": batch_num,
+            "sketches":  uc_sketches[i:i + _UC_BATCH_SIZE],
+            "start_idx": i + 1,
+            "end_idx":   min(i + _UC_BATCH_SIZE, total_ucs),
+        }
+        for batch_num, i in enumerate(range(0, total_ucs, _UC_BATCH_SIZE), start=1)
+    ]
 
-        try:
-            ucs = _generate_uc_batch(
-                batch, start, project_name, business_context, client, deployment
+    # Submit the shell call AND all UC batch calls to one pool simultaneously.
+    # +1 worker for the shell call, up to _UC_MAX_WORKERS for UC batches.
+    max_workers = min(_UC_MAX_WORKERS + 1, total_batches + 1)
+    shell_result: dict = {}
+    uc_results: dict[int, list] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # Shell future (tagged with key "shell")
+        shell_future = pool.submit(_generate_document_shell, extracted_data, client, deployment)
+        future_map = {shell_future: "shell"}
+
+        # UC batch futures (tagged with batch descriptor)
+        for b in batches:
+            f = pool.submit(
+                _generate_uc_batch,
+                b["sketches"], b["start_idx"], project_name, business_context, client, deployment,
             )
-            all_use_cases.extend(ucs)
-        except Exception as e:
-            logger.error(f"Generator | UC batch {start}-{end} failed: {e}")
-            _notify(f"  ⚠️ Batch {batch_num} failed — skipping (check logs)")
+            future_map[f] = b
 
-    shell["use_cases"] = all_use_cases
+        for future in as_completed(future_map):
+            tag = future_map[future]
+            if tag == "shell":
+                try:
+                    shell_result = future.result()
+                    _notify("  ↳ Document structure ready")
+                except Exception as e:
+                    logger.error(f"Generator | shell failed: {e}")
+                    raise RuntimeError(f"Document shell generation failed: {e}") from e
+            else:
+                b = tag
+                try:
+                    ucs = future.result()
+                    uc_results[b["batch_num"]] = ucs
+                    _notify(
+                        f"  ↳ Batch {b['batch_num']}/{total_batches}: "
+                        f"UC_{b['start_idx']:02d}–UC_{b['end_idx']:02d} — {len(ucs)} use cases done"
+                    )
+                except Exception as e:
+                    logger.error(f"Generator | UC batch {b['start_idx']}-{b['end_idx']} failed: {e}")
+                    _notify(f"  ⚠️ Batch {b['batch_num']} failed — skipping (check logs)")
+                    uc_results[b["batch_num"]] = []
+
+    # Reassemble UCs in original order and merge into shell
+    all_use_cases: list = []
+    for b in batches:
+        all_use_cases.extend(uc_results.get(b["batch_num"], []))
+
+    shell_result["use_cases"] = all_use_cases
 
     # ── Validate combined result ───────────────────────────────────────────────
-    validated = validate_brd(shell)
+    validated = validate_brd(shell_result)
     brd = validated.model_dump()
 
     _notify(
