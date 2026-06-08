@@ -119,24 +119,32 @@ st.success("🔐 Authenticated with Azure")
 
 # ── File upload ───────────────────────────────────────────────────────────────
 
-st.caption(
-    "Upload Teams transcripts (.txt) or supporting documents "
-    "(.pdf, .docx, .pptx, .xlsx) — all files are combined into one BRD."
-)
-
-_TXT_TYPES  = {".txt"}
-_DOC_TYPES  = {".pdf", ".docx", ".pptx", ".xlsx"}
-_ALL_TYPES  = _TXT_TYPES | _DOC_TYPES
+st.subheader("Step 1 — Upload Transcript")
+st.caption("Upload your Teams meeting transcript (.txt). Multiple files are combined.")
 
 uploaded_files = st.file_uploader(
-    "Upload files",
+    "Meeting Transcript(s)",
     type=["txt", "pdf", "docx", "pptx", "xlsx"],
     accept_multiple_files=True,
-    help="Teams transcripts (.txt) + any supporting docs (.pdf, .docx, .pptx, .xlsx).",
+    help="Teams transcripts (.txt) or any supporting meeting documents.",
+)
+
+st.subheader("Step 2 — Application SOP (Optional)")
+st.caption(
+    "Upload the application SOP or context document (.docx). "
+    "This gives the AI knowledge of your existing system, module names, and terminology — "
+    "resulting in more accurate use cases and scope."
+)
+
+sop_file = st.file_uploader(
+    "Application SOP / Context Document",
+    type=["docx"],
+    accept_multiple_files=False,
+    help="A Word document describing the application — SOP, functional spec, or system overview.",
 )
 
 if not uploaded_files:
-    st.info("Waiting for at least one file.")
+    st.info("Waiting for at least one transcript file.")
     st.stop()
 
 # ── Per-file extraction ───────────────────────────────────────────────────────
@@ -263,15 +271,24 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
             f"Speakers: **{', '.join(all_speakers) if all_speakers else 'not detected'}**"
         )
 
-        st.write("🔍 Extracting requirements...")
+        # Extract SOP text if provided
+        sop_text = ""
+        if sop_file is not None:
+            try:
+                sop_text = extract_text(sop_file.name, sop_file.getvalue())
+                st.write(f"📋 SOP loaded — **{len(sop_text.split()):,}** words from {sop_file.name}")
+            except Exception as e:
+                st.warning(f"Could not read SOP file ({e}) — continuing without it.")
+
+        st.write("🔍 Extracting use cases and requirements...")
         try:
-            extracted = extract(cleaned, all_speakers, auth.client, deployment)
+            extracted = extract(cleaned, all_speakers, auth.client, deployment, sop_text=sop_text)
         except Exception as e:
             st.error(f"Extractor failed: {e}")
             st.stop()
         st.write(
-            f"✅ Extracted — **{len(extracted.get('functional_requirements', []))}** FRs | "
-            f"**{len(extracted.get('non_functional_requirements', []))}** NFRs | "
+            f"✅ Extracted — **{len(extracted.get('use_cases', []))}** use cases | "
+            f"**{len(extracted.get('scope_modules', []))}** scope modules | "
             f"**{len(extracted.get('stakeholders', []))}** stakeholders"
         )
 
