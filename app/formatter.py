@@ -97,7 +97,7 @@ def _add_heading1(doc, text):
 
 def _add_heading2(doc, text):
     p = doc.add_heading(text, level=2)
-    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_before = Pt(12)
     p.paragraph_format.space_after  = Pt(4)
     return p
 
@@ -123,6 +123,46 @@ def _add_bullet(doc, text):
 
 def _safe(val, fallback="—") -> str:
     return str(val) if val not in (None, "", [], {}) else fallback
+
+
+# ── UC-specific helpers ───────────────────────────────────────────────────────
+
+def _add_uc_field(doc, label: str, value: str):
+    """Bold label followed by regular value on the same line."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(4)
+    run_label = p.add_run(f"{label}: ")
+    run_label.font.bold = True
+    run_label.font.name = "Arial"
+    run_label.font.size = Pt(11)
+    run_val = p.add_run(str(value or ""))
+    run_val.font.name = "Arial"
+    run_val.font.size = Pt(11)
+    run_val.font.color.rgb = RGBColor.from_string(TEXT)
+    return p
+
+
+def _add_uc_label(doc, label: str):
+    """Bold section label (e.g. 'Pre-Condition:')."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after  = Pt(2)
+    run = p.add_run(label)
+    run.font.bold = True
+    run.font.name = "Arial"
+    run.font.size = Pt(11)
+    return p
+
+
+def _add_numbered_para(doc, num: int, text: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.left_indent = Cm(0.5)
+    run = p.add_run(f"{num}. {str(text or '')}")
+    run.font.name = "Arial"
+    run.font.size = Pt(11)
+    run.font.color.rgb = RGBColor.from_string(TEXT)
+    return p
 
 
 # ── Table builder ─────────────────────────────────────────────────────────────
@@ -194,105 +234,166 @@ def _title_page(doc, brd):
     doc.add_page_break()
 
 
-def _section_exec_summary(doc, brd):
-    _add_heading1(doc, "1. Executive Summary")
-    _add_body(doc, brd.get("executive_summary"))
-    doc.add_page_break()
+def _section_introduction(doc, brd):
+    _add_heading1(doc, "1. Introduction")
+    _add_body(doc, brd.get("introduction", ""))
 
 
-def _section_overview(doc, brd):
-    _add_heading1(doc, "2. Project Overview")
-    _add_body(doc, brd.get("project_overview"))
+def _section_objectives(doc, brd):
+    _add_heading1(doc, "2. Business Objective")
+    for obj in brd.get("business_objectives", []):
+        obj_id    = _safe(obj.get("id"), "")
+        obj_title = _safe(obj.get("title"), "")
+        obj_desc  = _safe(obj.get("description"), "")
+
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(8)
+        p.paragraph_format.space_after  = Pt(4)
+        run_title = p.add_run(f"{obj_id}. {obj_title}" if obj_title else obj_id)
+        run_title.font.bold  = True
+        run_title.font.name  = "Arial"
+        run_title.font.size  = Pt(11)
+        run_title.font.color.rgb = RGBColor.from_string(NAVY)
+
+        _add_body(doc, obj_desc)
+
+
+def _section_stakeholders(doc, brd):
+    _add_heading1(doc, "3. Stakeholders")
+    rows = [[s.get("role", ""), s.get("responsibility", "")]
+            for s in brd.get("stakeholders", [])]
+    _add_table(doc, ["Role", "Responsibility"], [5, 11], rows)
 
 
 def _section_scope(doc, brd):
     scope = brd.get("scope", {})
-    _add_heading1(doc, "3. Scope")
-    _add_heading2(doc, "3.1  In Scope")
-    for item in scope.get("in_scope", []):
-        _add_bullet(doc, item)
-    _add_heading2(doc, "3.2  Out of Scope")
-    for item in scope.get("out_of_scope", []):
-        _add_bullet(doc, item)
+    _add_heading1(doc, "4. Scope")
 
+    _add_heading2(doc, "4.1  In-Scope")
+    in_scope_rows = [
+        [s.get("module", ""), s.get("feature", ""), s.get("description", ""), s.get("key_outcomes", "")]
+        for s in scope.get("in_scope", [])
+    ]
+    if in_scope_rows:
+        _add_table(doc, ["Module", "Feature", "Description", "Key Outcomes"], [3.5, 3.5, 5, 4], in_scope_rows)
+    else:
+        _add_body(doc, "No in-scope items defined.")
 
-def _section_stakeholders(doc, brd):
-    _add_heading1(doc, "4. Stakeholders")
-    rows = [[s.get("name"), s.get("role"), s.get("responsibility")]
-            for s in brd.get("stakeholders", [])]
-    _add_table(doc, ["Name", "Role", "Responsibility"], [4, 4, 8], rows)
-
-
-def _section_objectives(doc, brd):
-    _add_heading1(doc, "5. Business Objectives")
-    rows = [[o.get("id"), o.get("description"), o.get("success_criteria")]
-            for o in brd.get("business_objectives", [])]
-    _add_table(doc, ["ID", "Description", "Success Criteria"], [2, 7, 7], rows)
-
-
-def _section_fr(doc, brd):
-    _add_heading1(doc, "6. Functional Requirements")
-    rows = [[f.get("id"), f.get("description"), f.get("priority"), f.get("acceptance_criteria")]
-            for f in brd.get("functional_requirements", [])]
-    _add_table(doc, ["ID", "Description", "Priority", "Acceptance Criteria"], [1.5, 5.5, 2, 7], rows)
-
-
-def _section_nfr(doc, brd):
-    _add_heading1(doc, "7. Non-Functional Requirements")
-    rows = [[n.get("id"), n.get("category"), n.get("description"), n.get("priority")]
-            for n in brd.get("non_functional_requirements", [])]
-    _add_table(doc, ["ID", "Category", "Description", "Priority"], [1.5, 3, 9.5, 2], rows)
+    _add_heading2(doc, "4.2  Out of Scope")
+    out_scope_rows = [
+        [s.get("item", ""), s.get("description", "")]
+        for s in scope.get("out_of_scope", [])
+    ]
+    if out_scope_rows:
+        _add_table(doc, ["Items", "Description"], [5, 11], out_scope_rows)
+    else:
+        _add_body(doc, "No out-of-scope items defined.")
 
 
 def _section_assumptions(doc, brd):
-    _add_heading1(doc, "8. Assumptions & Constraints")
-    _add_heading2(doc, "8.1  Assumptions")
-    for item in brd.get("assumptions", []):
-        _add_bullet(doc, item)
-    _add_heading2(doc, "8.2  Constraints")
-    for item in brd.get("constraints", []):
-        _add_bullet(doc, item)
+    _add_heading1(doc, "5. Assumptions")
+    rows = [
+        [str(a.get("sr_no", i + 1)), a.get("assumption", ""), a.get("impact_if_changed", "")]
+        for i, a in enumerate(brd.get("assumptions", []))
+    ]
+    if rows:
+        _add_table(doc, ["Sr. No.", "Assumption", "Impact if Changed"], [1.5, 8, 6.5], rows)
+    else:
+        _add_body(doc, "No assumptions defined.")
 
 
-def _section_risks(doc, brd):
-    _add_heading1(doc, "9. Risks")
-    rows = [[r.get("id"), r.get("description"), r.get("impact"), r.get("mitigation")]
-            for r in brd.get("risks", [])]
-    _add_table(doc, ["ID", "Description", "Impact", "Mitigation"], [1.5, 5, 2, 7.5], rows)
+def _section_use_cases(doc, brd):
+    _add_heading1(doc, "6. Use Cases")
+
+    for uc in brd.get("use_cases", []):
+        uc_id   = _safe(uc.get("id"), "UC_XX")
+        uc_name = _safe(uc.get("name"), "")
+        _add_heading2(doc, f"{uc_id}: {uc_name}")
+
+        _add_uc_field(doc, "Description", uc.get("description", ""))
+        _add_uc_field(doc, "Role", uc.get("role", ""))
+
+        pre = uc.get("pre_conditions", [])
+        if pre:
+            _add_uc_label(doc, "Pre-Condition:")
+            for i, cond in enumerate(pre, 1):
+                _add_numbered_para(doc, i, cond)
+
+        post = uc.get("post_conditions", [])
+        if post:
+            _add_uc_label(doc, "Post-Condition:")
+            for i, cond in enumerate(post, 1):
+                _add_numbered_para(doc, i, cond)
+
+        main_flow = uc.get("main_flow", [])
+        if main_flow:
+            _add_uc_label(doc, "Main Flow:")
+            rows = [
+                [str(s.get("step", "")), s.get("user_action", ""), s.get("system_action", "")]
+                for s in main_flow
+            ]
+            _add_table(doc, ["Step", "User Action", "System Action"], [1.5, 7.5, 7], rows)
+
+        business_rules = uc.get("business_rules", [])
+        if business_rules:
+            _add_uc_label(doc, "Business Rules:")
+            rows = [
+                [str(r.get("sr_no", "")), r.get("rule", "")]
+                for r in business_rules
+            ]
+            _add_table(doc, ["Sr. No.", "Business Rule"], [2, 14], rows)
+
+        exceptional_flow = uc.get("exceptional_flow", [])
+        if exceptional_flow:
+            _add_uc_label(doc, "Exceptional Flow:")
+            rows = [
+                [str(e.get("sr_no", "")), e.get("exception", ""), e.get("error_message", "")]
+                for e in exceptional_flow
+            ]
+            _add_table(doc, ["Sr. No.", "Exception", "Error Message"], [2, 7.5, 6.5], rows)
+
+        doc.add_paragraph()
 
 
-def _section_open_questions(doc, brd):
-    _add_heading1(doc, "10. Open Questions")
-    rows = [[q.get("id"), q.get("question"), q.get("owner"), q.get("target_date")]
-            for q in brd.get("open_questions", [])]
-    _add_table(doc, ["ID", "Question", "Owner", "Target Date"], [1.5, 8.5, 3.5, 2.5], rows)
+def _section_notifications(doc, brd):
+    notifications = brd.get("notifications", [])
+    if not notifications:
+        return
+    _add_heading1(doc, "7. Notification / Communication")
+    rows = [
+        [n.get("event", ""), n.get("trigger", ""), n.get("channel", ""), n.get("message_template", "")]
+        for n in notifications
+    ]
+    _add_table(doc, ["Event", "Trigger", "Channel", "Message Template"], [3.5, 3.5, 2, 7], rows)
 
 
-def _section_action_items(doc, brd):
-    _add_heading1(doc, "11. Action Items")
-    rows = [[a.get("id"), a.get("action"), a.get("owner"), a.get("due_date")]
-            for a in brd.get("action_items", [])]
-    _add_table(doc, ["ID", "Action", "Owner", "Due Date"], [1.5, 8.5, 3.5, 2.5], rows)
+def _section_nfr(doc, brd):
+    _add_heading1(doc, "8. Non-Functional Requirements")
+    rows = [
+        [n.get("id", ""), n.get("category", ""), n.get("description", ""), n.get("priority", "")]
+        for n in brd.get("non_functional_requirements", [])
+    ]
+    if rows:
+        _add_table(doc, ["ID", "Category", "Description", "Priority"], [1.5, 3, 9.5, 2], rows)
+    else:
+        _add_body(doc, "No non-functional requirements defined.")
+
+
+def _section_adoption(doc, brd):
+    criteria = brd.get("adoption_criteria", [])
+    if not criteria:
+        return
+    _add_heading1(doc, "9. Adoption Matrix / Criteria")
+    rows = [
+        [c.get("success_criteria", ""), c.get("metrics_kpis", "")]
+        for c in criteria
+    ]
+    _add_table(doc, ["Success Criteria", "Metrics or KPIs"], [8, 8], rows)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def format_docx(brd_data: dict) -> bytes:
-    """
-    Convert a BRD JSON dict into a styled .docx and return the raw bytes.
-
-    Nothing is written to disk — the caller receives bytes directly and passes
-    them to st.download_button(). This eliminates the outputs/ directory entirely.
-
-    Args:
-        brd_data: output of generator.generate() after model_dump()
-
-    Returns:
-        Raw .docx bytes ready for st.download_button(data=...).
-
-    Raises:
-        RuntimeError: if document construction fails, with a clean message.
-    """
     doc = Document()
     _setup_styles(doc)
 
@@ -306,17 +407,15 @@ def format_docx(brd_data: dict) -> bytes:
 
     try:
         _title_page(doc, brd_data)
-        _section_exec_summary(doc, brd_data)
-        _section_overview(doc, brd_data)
-        _section_scope(doc, brd_data)
-        _section_stakeholders(doc, brd_data)
+        _section_introduction(doc, brd_data)
         _section_objectives(doc, brd_data)
-        _section_fr(doc, brd_data)
-        _section_nfr(doc, brd_data)
+        _section_stakeholders(doc, brd_data)
+        _section_scope(doc, brd_data)
         _section_assumptions(doc, brd_data)
-        _section_risks(doc, brd_data)
-        _section_open_questions(doc, brd_data)
-        _section_action_items(doc, brd_data)
+        _section_use_cases(doc, brd_data)
+        _section_notifications(doc, brd_data)
+        _section_nfr(doc, brd_data)
+        _section_adoption(doc, brd_data)
     except Exception as e:
         logger.error(f"Formatter | document build failed: {e}")
         raise RuntimeError(f"Document generation failed: {e}") from e
