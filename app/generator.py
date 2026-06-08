@@ -8,8 +8,9 @@ from app.prompts import GENERATION_SYSTEM
 from app.sanitizer import validate_brd
 
 
-_MAX_RETRIES = 3
-_BASE_DELAY  = 2  # seconds — doubles on each attempt (2s, 4s, 8s)
+_MAX_RETRIES = 5
+_BASE_DELAY  = 10   # seconds — exponential: 10s, 20s, 40s, 80s, 160s
+_MAX_DELAY   = 120  # cap so we never wait more than 2 minutes
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -18,7 +19,7 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
     """
     Call client.chat.completions.create with exponential backoff.
     Retries on:
-      - 429 RateLimitError  (Azure TPM/RPM quota hit)
+      - 429 RateLimitError  (Azure TPM/RPM quota hit) — honours Retry-After header
       - 5xx APIStatusError  (transient Azure-side failure)
     All other exceptions (400, 401, 422, etc.) are not transient — raised immediately.
     """
@@ -26,11 +27,14 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
         try:
             return client.chat.completions.create(**kwargs)
 
-        except openai.RateLimitError:
+        except openai.RateLimitError as e:
             if attempt == _MAX_RETRIES:
                 logger.error(f"Generator | rate limited — all {_MAX_RETRIES} attempts exhausted")
                 raise
-            delay = _BASE_DELAY ** attempt
+            retry_after = None
+            if hasattr(e, "response") and e.response is not None:
+                retry_after = e.response.headers.get("Retry-After")
+            delay = int(retry_after) if retry_after else min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
             logger.warning(
                 f"Generator | rate limited (attempt {attempt}/{_MAX_RETRIES}) "
                 f"— retrying in {delay}s"
@@ -40,7 +44,7 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
         except openai.APIStatusError as e:
             if e.status_code < 500 or attempt == _MAX_RETRIES:
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
             logger.warning(
                 f"Generator | API error {e.status_code} (attempt {attempt}/{_MAX_RETRIES}) "
                 f"— retrying in {delay}s"
