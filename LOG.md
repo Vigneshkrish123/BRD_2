@@ -170,6 +170,137 @@ Pipeline ran successfully locally:
 
 ---
 
+---
+
+## Session — 08 June 2026
+
+---
+
+### Change 1 — `app/prompts.py` (domain fidelity rules)
+
+**Change:** Added two explicit rules to strengthen domain specificity in both prompts.
+
+**EXTRACTION_SYSTEM — new rule added:**
+> "Preserve exact terminology, product names, numeric values, formulas, and domain-specific
+> language verbatim as spoken. Do not paraphrase technical content."
+
+**GENERATION_SYSTEM — two rules added/updated:**
+- Replaced `"Use formal business writing throughout"` with:
+  > "Write in formal business style, but anchor every requirement to the specific domain
+  > language, products, and numbers from the source data. A requirement that could apply
+  > to any project is a failed requirement."
+- Added:
+  > "Functional requirements must reference the specific system, product, or process named
+  > in the source — never genericize to 'the system' when a specific subsystem is named."
+
+**Reason:** Generic output like "the system shall process requests" was appearing in BRDs
+instead of domain-specific language from the transcript.
+
+---
+
+### Change 2 — v2 Use-Case-Driven BRD Schema (5 files)
+
+**Motivation:** Reference BRDs (Polycab house style) use a use-case-driven format —
+AS IS Business Flow, TO BE Business Process Flow, and full Use Case blocks — rather
+than flat FR-001/NFR-001 requirement lists. The v1 output did not match the expected format.
+
+#### `app/prompts.py` — full rewrite to v2
+
+**EXTRACTION_SYSTEM changes:**
+- New fields extracted: `domain_glossary` (every acronym/product/system named),
+  `as_is_flow`, `to_be_flow` (step/sub_steps/example), `in_scope` as structured objects
+  (module/feature/description), `use_cases` (actor/goal/key_steps/business_rules/exceptions)
+- Removed: `functional_requirements`, `action_items` (superseded by use_cases)
+- Stakeholders simplified to role/responsibility (no `name` or `interest` fields)
+- Key rule: DOMAIN FIDELITY IS THE PRIORITY — exact formulas/numbers verbatim
+
+**GENERATION_SYSTEM changes:**
+- New output schema: `introduction`, `business_objectives` (id/title/description),
+  `scope` (in_scope as InScopeItem objects, out_of_scope as OutOfScopeItem objects),
+  `assumptions` (with impact_if_changed), `as_is_business_flow`, `to_be_business_process_flow`
+  (hierarchical), `use_cases` (full actor-driven structure with main_flow table,
+  business_rules, exceptional_flow, per-UC out_of_scope)
+- Removed: `executive_summary`, `project_overview`, `functional_requirements`, `action_items`
+- Use case description enforced pattern: `"As a <role>, I want <action> so that <benefit>."`
+- TO BE flow must be hierarchical — steps + sub_steps + worked examples with exact numbers
+- Main flow: `user_action` set to `""` for system-only steps; formatter collapses column
+
+#### `app/sanitizer.py` — v2 models
+
+**ExtractedData updated** to match new extraction schema:
+- Added: `domain_glossary`, `as_is_flow`, `to_be_flow`, `use_cases`
+- Changed: `stakeholders` → role/responsibility only; `in_scope` → structured objects;
+  `assumptions` → objects with `impact_if_changed`
+- Removed: `functional_requirements`, `action_items`
+
+**BRDDocument replaced** with use-case-driven models:
+- New models: `UseCase`, `FlowStep`, `ToBeStep`, `ExceptionRow`, `InScopeItem`,
+  `OutOfScopeItem`, `Scope`, `Assumption` (with impact_if_changed), `BusinessObjective`
+  (id/title/description)
+- Removed models: `FunctionalRequirement`, `ActionItemBRD`, `BRDScope`
+- `renumber_ids()` updated for new ID series: BO-NNN, A-NNN, UC_NN, NFR-NNN, R-NNN, OQ-NNN
+- `_coerce_to_be()` field validator added: tolerates bare strings in TO BE flow
+- **`validate_brd()` now returns `dict`** (was returning model instance) — callers no longer
+  need `.model_dump()`
+
+#### `app/formatter.py` — full rewrite to v2
+
+New document structure:
+1. Title page
+2. Introduction — intro paragraph + Business Objectives + Stakeholders table
+3. Scope — In-Scope table (Module/Feature/Description/Key Outcomes) + Out-of-Scope table
+4. Assumptions — table with Impact If Changed column
+5. AS IS Business Flow — bullet list
+6. TO BE Business Process Flow — numbered steps, indented sub-bullets, italic worked examples
+7. Use Cases — per-UC subheading with Description, Role/Action/Benefit bullets,
+   End User, Pre/Post-Condition, Main Flow table (smart column collapse for system-only steps),
+   Business Rules table, Exceptional Flow table, per-UC Out of Scope table
+8. Non-Functional Requirements table
+9. Risks table
+10. Open Questions table
+
+Added `format_docx(brd) → bytes` shim (writes to temp file, returns bytes) so
+`streamlit_app.py` import unchanged.
+
+#### `app/extractor.py` and `app/generator.py` — log line updates
+- Removed references to `functional_requirements` in log output
+- Now logs `use_cases` count instead
+
+#### `UI/streamlit_app.py`
+- Progress message updated: shows use-case count instead of FR count
+
+---
+
+### Change 3 — 429 Rate Limit Fix (`app/extractor.py`, `app/generator.py`, `UI/streamlit_app.py`)
+
+**Problem:** All 5 retry attempts exhausted within ~2.5 minutes because:
+1. Previous delays (2s/4s/8s, 3 attempts) were far too short for Azure's TPM window
+2. `max_tokens=8192` on the extractor consumed excessive quota headroom
+
+**Logs showed:** Azure returning `Retry-After: ~30s` but quota never recovering —
+indicating the single request uses more tokens than the per-minute quota allows.
+
+**Fixes applied:**
+
+`extractor.py` and `generator.py`:
+- Retries: 3 → **5 attempts**
+- Delays: 2s/4s/8s → **10s / 20s / 40s / 80s / 120s** (capped at 120s)
+- Added `Retry-After` header read: if Azure provides it, use that value instead of backoff
+
+`extractor.py`:
+- `max_tokens`: 8192 → **4096** — extraction output does not need 8K tokens;
+  this halves per-request TPM consumption
+
+`UI/streamlit_app.py`:
+- 429 errors from extractor and generator now show a clear actionable message:
+  "Increase TPM quota in Azure AI Foundry → your deployment → edit"
+  instead of the raw API error string
+
+**Required Azure action:** Set TPM quota to at least **40K TPM** on the `gpt-4o-mini`
+deployment. An 8k-word transcript uses ~11K input + ~4K output = ~15K tokens per call.
+
+---
+
 ## Pending / Next Steps
 
 - [ ] Delete `ui/auth.py` (stale duplicate of app/auth.py)
