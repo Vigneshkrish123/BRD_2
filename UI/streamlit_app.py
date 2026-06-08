@@ -294,11 +294,15 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
         st.write("📝 Generating BRD...")
         try:
-            brd = generate(extracted, auth.client, deployment)
+            brd = generate(extracted, auth.client, deployment, on_progress=lambda msg: st.write(msg))
         except Exception as e:
             st.error(f"Generator failed: {e}")
             st.stop()
-        st.write("✅ BRD generated")
+        uc_count  = len(brd.get("use_cases", []))
+        nfr_count = len(brd.get("non_functional_requirements", []))
+        in_scope  = len(brd.get("scope", {}).get("in_scope", []))
+
+        st.write(f"✅ BRD generated — {uc_count} use cases | {in_scope} in-scope features | {nfr_count} NFRs")
 
         st.write("📄 Formatting .docx...")
         try:
