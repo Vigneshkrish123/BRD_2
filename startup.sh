@@ -16,7 +16,7 @@ echo "Starting BRD Agent..."
 echo "Python: $(python --version)"
 echo "Port: ${PORT:-8000}"
 
-streamlit run ui/streamlit_app.py \
+streamlit run UI/streamlit_app.py \
     --server.port       "${PORT:-8000}" \
     --server.address    "0.0.0.0" \
     --server.headless   true \

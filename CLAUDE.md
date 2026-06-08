@@ -269,9 +269,9 @@ On Azure App Service: set these under **Configuration → Application Settings**
 
 | Layer | Where | Limit |
 |---|---|---|
-| Input token guard | cost_guard.py | 20,000 tokens max input |
-| Upload size | Streamlit server flag | 5MB max file |
-| Azure TPM quota | Azure AI Foundry portal | Set to 40,000 TPM (primary cost wall) |
+| Input token guard | cost_guard.py | 100,000 tokens max input |
+| Upload size | Streamlit server flag | 20MB max file |
+| Azure TPM quota | Azure AI Foundry portal | Set to 150,000+ TPM (76k token input needs >84k TPM per call) |
 | Azure RPM quota | Azure AI Foundry portal | Set to 10 RPM |
 | Azure Cost Alert | Azure Cost Management | Set monthly budget alert |
 
