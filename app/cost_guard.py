@@ -14,9 +14,9 @@ Azure-side hardening (required — this is now your primary cost protection):
 from loguru import logger
 import tiktoken
 
-MAX_INPUT_TOKENS = 20_000  # ~15k words
+MAX_INPUT_TOKENS = 100_000  # gpt-4o 128k context window; leaves ~28k for system prompt + output
 
-_ENCODER = tiktoken.encoding_for_model("gpt-4o-mini")
+_ENCODER = tiktoken.encoding_for_model("gpt-4o")
 
 
 def count_tokens(text: str) -> int:

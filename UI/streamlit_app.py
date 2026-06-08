@@ -23,8 +23,8 @@ from app.cost_guard import check_input_size
 
 # ── Upload size caps ──────────────────────────────────────────────────────────
 
-_MAX_UPLOAD_BYTES  = 5 * 1024 * 1024
-_MAX_DECODED_CHARS = 2 * 1024 * 1024
+_MAX_UPLOAD_BYTES  = 20 * 1024 * 1024
+_MAX_DECODED_CHARS = 10 * 1024 * 1024
 _MAX_EXPAND_RATIO  = 10
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ with st.sidebar:
     st.header("📄 BRD Agent")
     st.divider()
     st.caption(f"👤 {username}")
-    st.caption(f"Limit: 20k tokens/input")
+    st.caption(f"Limit: 100k tokens/input")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 

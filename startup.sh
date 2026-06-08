@@ -22,4 +22,4 @@ streamlit run ui/streamlit_app.py \
     --server.headless   true \
     --server.enableCORS false \
     --server.enableXsrfProtection true \
-    --server.maxUploadSize 5
+    --server.maxUploadSize 20
