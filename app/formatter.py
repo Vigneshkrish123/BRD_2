@@ -1,328 +1,482 @@
+"""
+formatter.py — BRD JSON → styled .docx (Polycab house style).
+
+Renders the v2 use-case-driven schema produced by generator.py into a Word
+document that mirrors the reference BRDs: title page, numbered sections,
+navy-header tables, In/Out-of-Scope tables, AS IS / TO BE flows, and full
+use-case blocks (Description, Role/Action/Benefit, Pre/Post-Condition,
+Main Flow table, Business Rules, Exceptional Flow, per-UC Out of Scope).
+
+Pure python-docx. No Node, no subprocess.
+
+Public entry point:
+    build_brd(brd: dict, output_path: str) -> str
+"""
+
+from __future__ import annotations
+
 import io
-import datetime
-from loguru import logger
+import tempfile
+import os
+from datetime import date
 
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches, Cm
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor, Inches
+
+# ── Palette (matches reference: Polycab navy / blue) ──────────────────────────
+NAVY = RGBColor(0x1F, 0x38, 0x64)        # heading 2 / table header fill
+BLUE = RGBColor(0x2E, 0x75, 0xB6)        # heading 1
+WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+HEADER_FILL = "1F3864"                    # table header bg (hex, no #)
+ROW_ALT_FILL = "EAF1F8"                   # zebra stripe
+FONT = "Arial"
 
 
-# ── Colours ───────────────────────────────────────────────────────────────────
+# ── Low-level helpers ─────────────────────────────────────────────────────────
 
-NAVY   = "1F3864"
-BLUE   = "2E75B6"
-LIGHT  = "EBF3FB"
-WHITE  = "FFFFFF"
-TEXT   = "2C2C2C"
-BORDER = "C9D8EA"
-
-
-# ── Low-level XML helpers ─────────────────────────────────────────────────────
-
-def _set_cell_bg(cell, hex_color: str):
-    tc   = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    shd  = OxmlElement("w:shd")
-    shd.set(qn("w:val"),   "clear")
+def _set_cell_bg(cell, hex_fill: str) -> None:
+    """Set table cell shading — python-docx has no native API for this."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
     shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"),  hex_color)
-    tcPr.append(shd)
+    shd.set(qn("w:fill"), hex_fill)
+    tc_pr.append(shd)
 
 
-def _set_cell_border(cell, hex_color: str = BORDER):
-    tc   = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    tcBorders = OxmlElement("w:tcBorders")
-    for side in ("top", "left", "bottom", "right"):
-        el = OxmlElement(f"w:{side}")
-        el.set(qn("w:val"),   "single")
-        el.set(qn("w:sz"),    "4")
-        el.set(qn("w:color"), hex_color)
-        tcBorders.append(el)
-    tcPr.append(tcBorders)
+def _set_cell_margins(cell, top=60, bottom=60, left=110, right=110) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    m = OxmlElement("w:tcMar")
+    for edge, val in (("top", top), ("bottom", bottom), ("start", left), ("end", right)):
+        node = OxmlElement(f"w:{edge}")
+        node.set(qn("w:w"), str(val))
+        node.set(qn("w:type"), "dxa")
+        m.append(node)
+    tc_pr.append(m)
 
 
-def _cell_padding(cell, top=80, bottom=80, left=120, right=120):
-    tc   = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    mar  = OxmlElement("w:tcMar")
-    for side, val in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
-        el = OxmlElement(f"w:{side}")
-        el.set(qn("w:w"),    str(val))
-        el.set(qn("w:type"), "dxa")
-        mar.append(el)
-    tcPr.append(mar)
+def _style_cell_text(cell, *, bold=False, color: RGBColor | None = None, size=10):
+    for para in cell.paragraphs:
+        para.paragraph_format.space_before = Pt(1)
+        para.paragraph_format.space_after = Pt(1)
+        for run in para.runs:
+            run.font.name = FONT
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            if color is not None:
+                run.font.color.rgb = color
+        if not para.runs:  # empty cell still needs a styled (empty) run target
+            run = para.add_run("")
+            run.font.name = FONT
+            run.font.size = Pt(size)
 
 
-def _heading_border(paragraph):
-    pPr  = paragraph._p.get_or_add_pPr()
-    pBdr = OxmlElement("w:pBdr")
-    bot  = OxmlElement("w:bottom")
-    bot.set(qn("w:val"),   "single")
-    bot.set(qn("w:sz"),    "6")
-    bot.set(qn("w:color"), BLUE)
-    bot.set(qn("w:space"), "1")
-    pBdr.append(bot)
-    pPr.append(pBdr)
-
-
-# ── Document helpers ──────────────────────────────────────────────────────────
-
-def _setup_styles(doc: Document):
-    doc.styles["Normal"].font.name = "Arial"
-    doc.styles["Normal"].font.size = Pt(11)
-
-    h1 = doc.styles["Heading 1"]
-    h1.font.name = "Arial"
-    h1.font.size = Pt(14)
-    h1.font.bold = True
-    h1.font.color.rgb = RGBColor.from_string(BLUE)
-
-    h2 = doc.styles["Heading 2"]
-    h2.font.name = "Arial"
-    h2.font.size = Pt(12)
-    h2.font.bold = True
-    h2.font.color.rgb = RGBColor.from_string(NAVY)
-
-
-def _add_heading1(doc, text):
-    p = doc.add_heading(text, level=1)
-    _heading_border(p)
-    p.paragraph_format.space_before = Pt(16)
-    p.paragraph_format.space_after  = Pt(6)
-    return p
-
-
-def _add_heading2(doc, text):
-    p = doc.add_heading(text, level=2)
-    p.paragraph_format.space_before = Pt(10)
-    p.paragraph_format.space_after  = Pt(4)
-    return p
-
-
-def _add_body(doc, text):
-    p = doc.add_paragraph(str(text or ""))
-    p.paragraph_format.space_after = Pt(6)
-    for run in p.runs:
-        run.font.name = "Arial"
-        run.font.size = Pt(11)
-        run.font.color.rgb = RGBColor.from_string(TEXT)
-    return p
-
-
-def _add_bullet(doc, text):
-    p = doc.add_paragraph(str(text or ""), style="List Bullet")
-    p.paragraph_format.space_after = Pt(3)
-    for run in p.runs:
-        run.font.name = "Arial"
-        run.font.size = Pt(11)
-    return p
-
-
-def _safe(val, fallback="—") -> str:
-    return str(val) if val not in (None, "", [], {}) else fallback
-
-
-# ── Table builder ─────────────────────────────────────────────────────────────
-
-def _add_table(doc, headers: list, col_widths_cm: list, rows: list):
+def _add_table(doc, headers: list[str], rows: list[list[str]], widths: list[float] | None = None):
+    """Styled table: navy header, white header text, zebra body rows."""
     table = doc.add_table(rows=1, cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
+    table.autofit = False
 
-    hdr_cells = table.rows[0].cells
-    for i, cell in enumerate(hdr_cells):
-        cell.width = Cm(col_widths_cm[i])
-        cell.text  = headers[i]
-        _set_cell_bg(cell, NAVY)
-        _set_cell_border(cell, NAVY)
-        _cell_padding(cell)
-        run = cell.paragraphs[0].runs[0]
-        run.font.bold      = True
-        run.font.size      = Pt(10)
-        run.font.color.rgb = RGBColor.from_string(WHITE)
-        run.font.name      = "Arial"
+    hdr = table.rows[0].cells
+    for i, text in enumerate(headers):
+        hdr[i].text = str(text)
+        _set_cell_bg(hdr[i], HEADER_FILL)
+        _set_cell_margins(hdr[i])
+        _style_cell_text(hdr[i], bold=True, color=WHITE)
 
-    for ri, row_data in enumerate(rows):
-        row_cells = table.add_row().cells
-        bg = LIGHT if ri % 2 == 0 else WHITE
-        for i, cell in enumerate(row_cells):
-            cell.width = Cm(col_widths_cm[i])
-            val = _safe(row_data[i] if i < len(row_data) else "")
-            cell.text = val
-            _set_cell_bg(cell, bg)
-            _set_cell_border(cell)
-            _cell_padding(cell)
-            runs = cell.paragraphs[0].runs
-            run  = runs[0] if runs else cell.paragraphs[0].add_run(val)
-            run.font.size      = Pt(10)
-            run.font.name      = "Arial"
-            run.font.color.rgb = RGBColor.from_string(TEXT)
+    for r, row in enumerate(rows):
+        cells = table.add_row().cells
+        for i in range(len(headers)):
+            cells[i].text = str(row[i]) if i < len(row) else ""
+            if r % 2 == 1:
+                _set_cell_bg(cells[i], ROW_ALT_FILL)
+            _set_cell_margins(cells[i])
+            _style_cell_text(cells[i])
+
+    if widths:
+        for i, w in enumerate(widths):
+            for row in table.rows:
+                row.cells[i].width = Inches(w)
+    return table
+
+
+def _heading(doc, text: str, level: int):
+    p = doc.add_heading(level=level)
+    run = p.add_run(text)
+    run.font.name = FONT
+    run.font.bold = True
+    if level == 1:
+        run.font.size = Pt(15)
+        run.font.color.rgb = BLUE
+    else:
+        run.font.size = Pt(13)
+        run.font.color.rgb = NAVY
+    return p
+
+
+def _para(doc, text: str, *, bold=False, italic=False, size=10.5, space_after=4):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(space_after)
+    run = p.add_run(text)
+    run.font.name = FONT
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.italic = italic
+    return p
+
+
+def _label_value(doc, label: str, value: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(2)
+    b = p.add_run(f"{label}: ")
+    b.font.name = FONT
+    b.font.size = Pt(10.5)
+    b.font.bold = True
+    v = p.add_run(value)
+    v.font.name = FONT
+    v.font.size = Pt(10.5)
+    return p
+
+
+def _bullet(doc, text: str, *, lead: str | None = None):
+    p = doc.add_paragraph(style="List Bullet")
+    p.paragraph_format.space_after = Pt(2)
+    if lead:
+        b = p.add_run(f"{lead}: ")
+        b.font.name = FONT
+        b.font.size = Pt(10.5)
+        b.font.bold = True
+    run = p.add_run(text)
+    run.font.name = FONT
+    run.font.size = Pt(10.5)
+    return p
+
+
+def _numbered(doc, text: str):
+    p = doc.add_paragraph(style="List Number")
+    p.paragraph_format.space_after = Pt(2)
+    run = p.add_run(text)
+    run.font.name = FONT
+    run.font.size = Pt(10.5)
+    return p
+
+
+def _join(values) -> str:
+    """Render a list of pre/post-conditions as '1) a  2) b'."""
+    if not values:
+        return "—"
+    if len(values) == 1:
+        return str(values[0])
+    return "  ".join(f"{i+1}) {v}" for i, v in enumerate(values))
+
+
+# ── Section renderers ─────────────────────────────────────────────────────────
+
+def _title_page(doc, info: dict):
+    for _ in range(3):
+        doc.add_paragraph()
+    for text, size, bold in (
+        ("Polycab India Limited.", 16, True),
+        ("Business Requirements Document", 20, True),
+    ):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(text)
+        r.font.name = FONT
+        r.font.size = Pt(size)
+        r.font.bold = bold
+        if text.startswith("Business"):
+            r.font.color.rgb = NAVY
 
     doc.add_paragraph()
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"Project Name: {info.get('project_name', 'TBD')}")
+    r.font.name = FONT
+    r.font.size = Pt(16)
+    r.font.bold = True
+    r.font.color.rgb = BLUE
 
-
-# ── Section builders ──────────────────────────────────────────────────────────
-
-def _title_page(doc, brd):
-    info  = brd.get("document_info", {})
-    today = datetime.date.today().strftime("%d %B %Y")
-
-    for _ in range(7):
+    for _ in range(4):
         doc.add_paragraph()
 
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("BUSINESS REQUIREMENTS DOCUMENT")
-    run.font.name = "Arial"; run.font.size = Pt(26)
-    run.font.bold = True; run.font.color.rgb = RGBColor.from_string(BLUE)
+    meta = [
+        ["Version", info.get("version", "1.0")],
+        ["Status", info.get("status", "Draft")],
+        ["Date", date.today().strftime("%d %B %Y")],
+        ["Prepared By", info.get("prepared_by", "BRD Agent (AI-assisted)")],
+    ]
+    t = _add_table(doc, ["Field", "Details"], meta, widths=[2.0, 4.5])
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    proj = doc.add_paragraph()
-    proj.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    proj.paragraph_format.space_after = Pt(20)
-    run2 = proj.add_run(_safe(info.get("project_name"), "Project"))
-    run2.font.name = "Arial"; run2.font.size = Pt(18)
-    run2.font.color.rgb = RGBColor.from_string(NAVY)
-
-    _add_table(doc, ["Field", "Details"], [4, 12], [
-        ["Version",     _safe(info.get("version"),     "1.0")],
-        ["Status",      _safe(info.get("status"),      "Draft")],
-        ["Date",        today],
-        ["Prepared By", _safe(info.get("prepared_by"), "BRD Agent (AI-assisted)")],
-    ])
     doc.add_page_break()
 
 
-def _section_exec_summary(doc, brd):
-    _add_heading1(doc, "1. Executive Summary")
-    _add_body(doc, brd.get("executive_summary"))
-    doc.add_page_break()
+def _introduction(doc, brd: dict):
+    _heading(doc, "1. Introduction", 1)
+    if brd.get("introduction"):
+        _para(doc, brd["introduction"], size=10.5, space_after=8)
+
+    _heading(doc, "1.1 Business Objectives", 2)
+    for bo in brd.get("business_objectives", []):
+        if isinstance(bo, dict):
+            title = bo.get("title") or bo.get("id", "")
+            _para(doc, title, bold=True, space_after=1)
+            _para(doc, bo.get("description", ""), space_after=6)
+        else:
+            _bullet(doc, str(bo))
+
+    if brd.get("stakeholders"):
+        _heading(doc, "1.2 Stakeholders", 2)
+        rows = [[s.get("role", ""), s.get("responsibility", "")] for s in brd["stakeholders"]]
+        _add_table(doc, ["Role", "Responsibility"], rows, widths=[2.5, 4.0])
 
 
-def _section_overview(doc, brd):
-    _add_heading1(doc, "2. Project Overview")
-    _add_body(doc, brd.get("project_overview"))
-
-
-def _section_scope(doc, brd):
+def _scope(doc, brd: dict):
     scope = brd.get("scope", {})
-    _add_heading1(doc, "3. Scope")
-    _add_heading2(doc, "3.1  In Scope")
-    for item in scope.get("in_scope", []):
-        _add_bullet(doc, item)
-    _add_heading2(doc, "3.2  Out of Scope")
-    for item in scope.get("out_of_scope", []):
-        _add_bullet(doc, item)
+    _heading(doc, "2. Scope", 1)
+
+    _heading(doc, "2.1 In-Scope", 2)
+    in_scope = scope.get("in_scope", [])
+    if in_scope and isinstance(in_scope[0], dict):
+        rows = [[i.get("module", ""), i.get("feature", ""),
+                 i.get("description", ""), i.get("key_outcomes", "")] for i in in_scope]
+        _add_table(doc, ["Module", "Feature", "Description", "Key Outcomes"],
+                   rows, widths=[1.3, 1.6, 2.4, 1.6])
+    else:
+        for item in in_scope:
+            _bullet(doc, str(item))
+
+    _heading(doc, "2.2 Out of Scope", 2)
+    out_scope = scope.get("out_of_scope", [])
+    if out_scope and isinstance(out_scope[0], dict):
+        rows = [[o.get("item", ""), o.get("description", "")] for o in out_scope]
+        _add_table(doc, ["Item", "Description"], rows, widths=[2.5, 4.0])
+    else:
+        for item in out_scope:
+            _bullet(doc, str(item))
 
 
-def _section_stakeholders(doc, brd):
-    _add_heading1(doc, "4. Stakeholders")
-    rows = [[s.get("name"), s.get("role"), s.get("responsibility")]
-            for s in brd.get("stakeholders", [])]
-    _add_table(doc, ["Name", "Role", "Responsibility"], [4, 4, 8], rows)
+def _assumptions(doc, brd: dict):
+    rows_src = brd.get("assumptions", [])
+    if not rows_src:
+        return
+    _heading(doc, "3. Assumptions", 1)
+    if isinstance(rows_src[0], dict):
+        rows = [[str(i + 1), a.get("assumption", ""), a.get("impact_if_changed", "") or "—"]
+                for i, a in enumerate(rows_src)]
+        _add_table(doc, ["Sr. No.", "Assumption", "Impact If Changed"],
+                   rows, widths=[0.9, 3.3, 2.3])
+    else:
+        for a in rows_src:
+            _bullet(doc, str(a))
 
 
-def _section_objectives(doc, brd):
-    _add_heading1(doc, "5. Business Objectives")
-    rows = [[o.get("id"), o.get("description"), o.get("success_criteria")]
-            for o in brd.get("business_objectives", [])]
-    _add_table(doc, ["ID", "Description", "Success Criteria"], [2, 7, 7], rows)
+def _as_is(doc, brd: dict):
+    flow = brd.get("as_is_business_flow", [])
+    if not flow:
+        return
+    _heading(doc, "4. AS IS Business Flow", 1)
+    for step in flow:
+        _bullet(doc, str(step))
 
 
-def _section_fr(doc, brd):
-    _add_heading1(doc, "6. Functional Requirements")
-    rows = [[f.get("id"), f.get("description"), f.get("priority"), f.get("acceptance_criteria")]
-            for f in brd.get("functional_requirements", [])]
-    _add_table(doc, ["ID", "Description", "Priority", "Acceptance Criteria"], [1.5, 5.5, 2, 7], rows)
+def _sub_bullet(doc, text: str):
+    p = doc.add_paragraph(style="List Bullet")
+    p.paragraph_format.left_indent = Inches(0.85)
+    p.paragraph_format.space_after = Pt(1)
+    run = p.add_run(str(text))
+    run.font.name = FONT
+    run.font.size = Pt(10.5)
+    return p
 
 
-def _section_nfr(doc, brd):
-    _add_heading1(doc, "7. Non-Functional Requirements")
-    rows = [[n.get("id"), n.get("category"), n.get("description"), n.get("priority")]
-            for n in brd.get("non_functional_requirements", [])]
-    _add_table(doc, ["ID", "Category", "Description", "Priority"], [1.5, 3, 9.5, 2], rows)
+def _example(doc, text: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.left_indent = Inches(0.85)
+    p.paragraph_format.space_after = Pt(4)
+    run = p.add_run(f"Example: {text}")
+    run.font.name = FONT
+    run.font.size = Pt(10)
+    run.font.italic = True
+    run.font.color.rgb = NAVY
+    return p
 
 
-def _section_assumptions(doc, brd):
-    _add_heading1(doc, "8. Assumptions & Constraints")
-    _add_heading2(doc, "8.1  Assumptions")
-    for item in brd.get("assumptions", []):
-        _add_bullet(doc, item)
-    _add_heading2(doc, "8.2  Constraints")
-    for item in brd.get("constraints", []):
-        _add_bullet(doc, item)
+def _to_be(doc, brd: dict):
+    flow = brd.get("to_be_business_process_flow", [])
+    if not flow:
+        return
+    _heading(doc, "5. TO BE Business Process Flow", 1)
+    for item in flow:
+        if isinstance(item, dict):
+            _numbered(doc, item.get("step", ""))
+            for sub in item.get("sub_steps", []):
+                _sub_bullet(doc, sub)
+            if item.get("example"):
+                _example(doc, item["example"])
+        else:
+            _numbered(doc, str(item))
 
 
-def _section_risks(doc, brd):
-    _add_heading1(doc, "9. Risks")
-    rows = [[r.get("id"), r.get("description"), r.get("impact"), r.get("mitigation")]
-            for r in brd.get("risks", [])]
-    _add_table(doc, ["ID", "Description", "Impact", "Mitigation"], [1.5, 5, 2, 7.5], rows)
+def _use_cases(doc, brd: dict):
+    ucs = brd.get("use_cases", [])
+    if not ucs:
+        return
+    _heading(doc, "6. Use Cases", 1)
+    for idx, uc in enumerate(ucs, start=1):
+        uc_id = uc.get("id", f"UC_{idx:02d}")
+        _heading(doc, f"6.{idx} {uc_id}: {uc.get('title', '')}", 2)
+
+        _para(doc, "Description:", bold=True, space_after=1)
+        _para(doc, uc.get("description", ""), space_after=6)
+
+        if uc.get("role"):
+            _bullet(doc, uc["role"], lead="Role")
+        if uc.get("action"):
+            _bullet(doc, uc["action"], lead="Action")
+        if uc.get("benefit"):
+            _bullet(doc, uc["benefit"], lead="Benefit")
+
+        if uc.get("end_user"):
+            _label_value(doc, "End User", uc["end_user"])
+        _label_value(doc, "Pre-Condition", _join(uc.get("pre_conditions", [])))
+        _label_value(doc, "Post-Condition", _join(uc.get("post_conditions", [])))
+
+        # Main Flow — collapse User Action column when every step is system-driven.
+        main_flow = uc.get("main_flow", [])
+        if main_flow:
+            _para(doc, "Main Flow:", bold=True, space_after=2)
+            has_user = any((s.get("user_action") or "").strip() for s in main_flow)
+            if has_user:
+                rows = [[s.get("step", str(i + 1)), s.get("user_action", ""), s.get("system_action", "")]
+                        for i, s in enumerate(main_flow)]
+                _add_table(doc, ["Step", "User Action", "System Action"],
+                           rows, widths=[0.7, 2.75, 3.05])
+            else:
+                rows = [[s.get("step", str(i + 1)), s.get("system_action", "")]
+                        for i, s in enumerate(main_flow)]
+                _add_table(doc, ["Step", "System Action"], rows, widths=[0.9, 5.6])
+
+        if uc.get("business_rules"):
+            _para(doc, "Business Rules:", bold=True, space_after=2)
+            rows = [[str(i + 1), r] for i, r in enumerate(uc["business_rules"])]
+            _add_table(doc, ["Sr. No.", "Business Rule"], rows, widths=[0.9, 5.6])
+
+        ex = uc.get("exceptional_flow", [])
+        if ex:
+            _para(doc, "Exceptional Flow:", bold=True, space_after=2)
+            rows = [[str(i + 1), e.get("exception", ""), e.get("error_message", "") or "—"]
+                    for i, e in enumerate(ex)]
+            _add_table(doc, ["Sr. No.", "Exception", "Error Message / Behaviour"],
+                       rows, widths=[0.9, 2.8, 2.8])
+
+        if uc.get("out_of_scope"):
+            _para(doc, "Out of Scope:", bold=True, space_after=2)
+            rows = [[str(i + 1), o] for i, o in enumerate(uc["out_of_scope"])]
+            _add_table(doc, ["Sr. No.", "Description"], rows, widths=[0.9, 5.6])
+
+        doc.add_paragraph()
 
 
-def _section_open_questions(doc, brd):
-    _add_heading1(doc, "10. Open Questions")
-    rows = [[q.get("id"), q.get("question"), q.get("owner"), q.get("target_date")]
-            for q in brd.get("open_questions", [])]
-    _add_table(doc, ["ID", "Question", "Owner", "Target Date"], [1.5, 8.5, 3.5, 2.5], rows)
+def _nfr(doc, brd: dict, n: int):
+    nfrs = brd.get("non_functional_requirements", [])
+    if not nfrs:
+        return n
+    _heading(doc, f"{n}. Non-Functional Requirements", 1)
+    if isinstance(nfrs[0], dict):
+        rows = [[x.get("id", f"NFR-{i+1:03d}"), x.get("category", ""),
+                 x.get("description", ""), x.get("priority", "")] for i, x in enumerate(nfrs)]
+        _add_table(doc, ["ID", "Category", "Requirement", "Priority"],
+                   rows, widths=[1.0, 1.4, 3.2, 0.9])
+    else:
+        for x in nfrs:
+            _bullet(doc, str(x))
+    return n + 1
 
 
-def _section_action_items(doc, brd):
-    _add_heading1(doc, "11. Action Items")
-    rows = [[a.get("id"), a.get("action"), a.get("owner"), a.get("due_date")]
-            for a in brd.get("action_items", [])]
-    _add_table(doc, ["ID", "Action", "Owner", "Due Date"], [1.5, 8.5, 3.5, 2.5], rows)
+def _risks(doc, brd: dict, n: int):
+    risks = brd.get("risks", [])
+    if not risks:
+        return n
+    _heading(doc, f"{n}. Risks", 1)
+    rows = [[r.get("id", f"R-{i+1:03d}"), r.get("description", ""),
+             r.get("impact", ""), r.get("mitigation", "")] for i, r in enumerate(risks)]
+    _add_table(doc, ["ID", "Risk", "Impact", "Mitigation"], rows, widths=[0.9, 2.6, 0.9, 2.1])
+    return n + 1
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def _open_questions(doc, brd: dict, n: int):
+    oqs = brd.get("open_questions", [])
+    if not oqs:
+        return n
+    _heading(doc, f"{n}. Open Questions", 1)
+    rows = [[q.get("id", f"OQ-{i+1:03d}"), q.get("question", ""),
+             q.get("owner", ""), q.get("target_date", "")] for i, q in enumerate(oqs)]
+    _add_table(doc, ["ID", "Question", "Owner", "Target Date"], rows, widths=[0.9, 3.4, 1.3, 0.9])
+    return n + 1
 
-def format_docx(brd_data: dict) -> bytes:
-    """
-    Convert a BRD JSON dict into a styled .docx and return the raw bytes.
 
-    Nothing is written to disk — the caller receives bytes directly and passes
-    them to st.download_button(). This eliminates the outputs/ directory entirely.
+# ── Document-level setup ──────────────────────────────────────────────────────
 
-    Args:
-        brd_data: output of generator.generate() after model_dump()
+def _setup_base_styles(doc):
+    normal = doc.styles["Normal"]
+    normal.font.name = FONT
+    normal.font.size = Pt(10.5)
 
-    Returns:
-        Raw .docx bytes ready for st.download_button(data=...).
 
-    Raises:
-        RuntimeError: if document construction fails, with a clean message.
-    """
+def _add_footer_page_numbers(doc):
+    section = doc.sections[0]
+    footer = section.footer
+    p = footer.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    fld_begin = OxmlElement("w:fldChar"); fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText"); instr.set(qn("xml:space"), "preserve"); instr.text = "PAGE"
+    fld_end = OxmlElement("w:fldChar"); fld_end.set(qn("w:fldCharType"), "end")
+    run._r.append(fld_begin); run._r.append(instr); run._r.append(fld_end)
+    run.font.name = FONT
+    run.font.size = Pt(9)
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
+def build_brd(brd: dict, output_path: str) -> str:
     doc = Document()
-    _setup_styles(doc)
+    _setup_base_styles(doc)
+    _add_footer_page_numbers(doc)
 
-    for section in doc.sections:
-        section.top_margin    = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin   = Inches(1)
-        section.right_margin  = Inches(1)
+    info = brd.get("document_info", {})
+    _title_page(doc, info)
 
-    logger.info("Formatter | building document...")
+    _introduction(doc, brd)
+    _scope(doc, brd)
+    _assumptions(doc, brd)
+    _as_is(doc, brd)
+    _to_be(doc, brd)
+    _use_cases(doc, brd)
 
+    n = 7
+    n = _nfr(doc, brd, n)
+    n = _risks(doc, brd, n)
+    n = _open_questions(doc, brd, n)
+
+    doc.save(output_path)
+    return output_path
+
+
+def format_docx(brd: dict) -> bytes:
+    """Convenience wrapper: build BRD and return raw .docx bytes (for Streamlit download)."""
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp_path = tmp.name
     try:
-        _title_page(doc, brd_data)
-        _section_exec_summary(doc, brd_data)
-        _section_overview(doc, brd_data)
-        _section_scope(doc, brd_data)
-        _section_stakeholders(doc, brd_data)
-        _section_objectives(doc, brd_data)
-        _section_fr(doc, brd_data)
-        _section_nfr(doc, brd_data)
-        _section_assumptions(doc, brd_data)
-        _section_risks(doc, brd_data)
-        _section_open_questions(doc, brd_data)
-        _section_action_items(doc, brd_data)
-    except Exception as e:
-        logger.error(f"Formatter | document build failed: {e}")
-        raise RuntimeError(f"Document generation failed: {e}") from e
-
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    logger.info("Formatter | document built successfully")
-    return buffer.getvalue()
+        build_brd(brd, tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(tmp_path)

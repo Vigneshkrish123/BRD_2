@@ -84,12 +84,11 @@ def generate(
 
     # ── Validate output ───────────────────────────────────────────────────────
     raw = json.loads(response.choices[0].message.content)
-    validated = validate_brd(raw)
-    brd = validated.model_dump()
+    brd = validate_brd(raw)
 
     logger.info(
         f"Generator | done | "
-        f"FR={len(brd.get('functional_requirements', []))} | "
+        f"UC={len(brd.get('use_cases', []))} | "
         f"tokens in={response.usage.prompt_tokens} out={response.usage.completion_tokens}"
     )
     return brd

@@ -270,7 +270,7 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
             st.error(f"Extractor failed: {e}")
             st.stop()
         st.write(
-            f"✅ Extracted — **{len(extracted.get('functional_requirements', []))}** FRs | "
+            f"✅ Extracted — **{len(extracted.get('use_cases', []))}** use cases | "
             f"**{len(extracted.get('non_functional_requirements', []))}** NFRs | "
             f"**{len(extracted.get('stakeholders', []))}** stakeholders"
         )

@@ -107,7 +107,7 @@ def extract(
 
     logger.info(
         f"Extractor | done | "
-        f"FR={len(data.get('functional_requirements', []))} | "
+        f"UC={len(data.get('use_cases', []))} | "
         f"NFR={len(data.get('non_functional_requirements', []))} | "
         f"tokens in={response.usage.prompt_tokens} out={response.usage.completion_tokens}"
     )
