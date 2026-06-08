@@ -118,54 +118,65 @@ st.success("🔐 Authenticated with Azure")
 
 # ── File upload ───────────────────────────────────────────────────────────────
 
-st.caption("Upload a Teams meeting transcript (.txt) and download a structured BRD (.docx).")
+st.caption("Upload one or more Teams meeting transcripts (.txt) and download a combined structured BRD (.docx).")
 
-uploaded_file = st.file_uploader(
-    "Upload transcript",
+uploaded_files = st.file_uploader(
+    "Upload transcript(s)",
     type=["txt"],
-    help="Teams → ... → Download > Transcript (.txt)",
+    accept_multiple_files=True,
+    help="Teams → ... → Download > Transcript (.txt). You can select multiple files.",
 )
 
-if not uploaded_file:
-    st.info("Waiting for a transcript file.")
+if not uploaded_files:
+    st.info("Waiting for at least one transcript file.")
     st.stop()
 
-# ── Size guards ───────────────────────────────────────────────────────────────
+# ── Size guards (applied per-file, then to combined text) ────────────────────
 
-raw_bytes = uploaded_file.getvalue()
+parts: list[str] = []
 
-if len(raw_bytes) > _MAX_UPLOAD_BYTES:
-    st.error(
-        f"File too large: {len(raw_bytes) / 1024 / 1024:.1f} MB — "
-        f"maximum is {_MAX_UPLOAD_BYTES // 1024 // 1024} MB."
-    )
-    st.stop()
+for f in uploaded_files:
+    raw_bytes = f.getvalue()
 
-raw_text = raw_bytes.decode("utf-8", errors="ignore")
+    if len(raw_bytes) > _MAX_UPLOAD_BYTES:
+        st.error(
+            f"**{f.name}** is too large: {len(raw_bytes) / 1024 / 1024:.1f} MB — "
+            f"maximum is {_MAX_UPLOAD_BYTES // 1024 // 1024} MB per file."
+        )
+        st.stop()
 
-if len(raw_text) > _MAX_DECODED_CHARS:
-    st.error(
-        f"Decoded content too large ({len(raw_text):,} chars). "
-        f"Maximum is {_MAX_DECODED_CHARS:,} characters."
-    )
-    st.stop()
+    text = raw_bytes.decode("utf-8", errors="ignore")
 
-_expand = len(raw_text) / max(len(raw_bytes), 1)
-if _expand > _MAX_EXPAND_RATIO:
-    st.error(
-        f"File expansion ratio {_expand:.1f}× exceeds limit ({_MAX_EXPAND_RATIO}×). "
-        "Possible compressed or binary content."
-    )
-    st.stop()
+    if len(text) > _MAX_DECODED_CHARS:
+        st.error(
+            f"**{f.name}** decoded content too large ({len(text):,} chars). "
+            f"Maximum is {_MAX_DECODED_CHARS:,} characters per file."
+        )
+        st.stop()
+
+    _expand = len(text) / max(len(raw_bytes), 1)
+    if _expand > _MAX_EXPAND_RATIO:
+        st.error(
+            f"**{f.name}** expansion ratio {_expand:.1f}× exceeds limit ({_MAX_EXPAND_RATIO}×). "
+            "Possible compressed or binary content."
+        )
+        st.stop()
+
+    parts.append(text)
+
+# Join transcripts with a clear separator so the cleaner sees them as one stream
+raw_text = "\n\n".join(parts)
 
 word_count = len(raw_text.split())
+file_names = ", ".join(f.name for f in uploaded_files)
 
-col1, col2 = st.columns(2)
-col1.metric("Words", f"{word_count:,}")
-col2.metric("File",  uploaded_file.name)
+col1, col2, col3 = st.columns(3)
+col1.metric("Files",  len(uploaded_files))
+col2.metric("Words", f"{word_count:,}")
+col3.metric("File(s)", file_names if len(uploaded_files) == 1 else f"{len(uploaded_files)} files")
 
 if word_count < 300:
-    st.warning("Transcript looks short — make sure you uploaded the full file.")
+    st.warning("Transcript looks short — make sure you uploaded the full file(s).")
 
 st.divider()
 
