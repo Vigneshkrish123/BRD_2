@@ -11,8 +11,21 @@ from app.sanitizer import sanitize_transcript, sanitize_speakers, validate_extra
 _TRANSCRIPT_START = "<<<TRANSCRIPT_BEGIN>>>"
 _TRANSCRIPT_END   = "<<<TRANSCRIPT_END>>>"
 
-_MAX_RETRIES   = 3
-_BASE_DELAY    = 2  # seconds — delay doubles on each attempt (2s, 4s, 8s)
+_MAX_RETRIES   = 5
+_BASE_DELAY    = 10  # seconds — fallback if no Retry-After header
+
+
+def _retry_delay(e: Exception, attempt: int, label: str) -> float:
+    """Read Retry-After header from Azure 429; fall back to exponential backoff."""
+    try:
+        retry_after = int(e.response.headers.get("Retry-After", 0))
+        if retry_after > 0:
+            logger.warning(f"{label} | Azure Retry-After: {retry_after}s")
+            return float(retry_after)
+    except Exception:
+        pass
+    delay = _BASE_DELAY * (2 ** (attempt - 1))  # 10s, 20s, 40s, 80s
+    return delay
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -21,7 +34,7 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
     """
     Call client.chat.completions.create with exponential backoff.
     Retries on:
-      - 429 RateLimitError  (Azure TPM/RPM quota hit)
+      - 429 RateLimitError  (Azure TPM/RPM quota hit) — honours Retry-After header
       - 5xx APIStatusError  (transient Azure-side failure)
     All other exceptions (400, 401, 422, etc.) are not transient — raised immediately.
     """
@@ -33,21 +46,20 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
             if attempt == _MAX_RETRIES:
                 logger.error(f"Extractor | rate limited — all {_MAX_RETRIES} attempts exhausted")
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _retry_delay(e, attempt, "Extractor")
             logger.warning(
                 f"Extractor | rate limited (attempt {attempt}/{_MAX_RETRIES}) "
-                f"— retrying in {delay}s"
+                f"— retrying in {delay:.0f}s"
             )
             time.sleep(delay)
 
         except openai.APIStatusError as e:
             if e.status_code < 500 or attempt == _MAX_RETRIES:
-                # 4xx errors are not transient — re-raise immediately
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _BASE_DELAY * (2 ** (attempt - 1))
             logger.warning(
                 f"Extractor | API error {e.status_code} (attempt {attempt}/{_MAX_RETRIES}) "
-                f"— retrying in {delay}s"
+                f"— retrying in {delay:.0f}s"
             )
             time.sleep(delay)
 

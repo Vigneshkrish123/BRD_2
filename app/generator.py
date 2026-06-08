@@ -8,8 +8,20 @@ from app.prompts import GENERATION_SYSTEM
 from app.sanitizer import validate_brd
 
 
-_MAX_RETRIES = 3
-_BASE_DELAY  = 2  # seconds — doubles on each attempt (2s, 4s, 8s)
+_MAX_RETRIES = 5
+_BASE_DELAY  = 10  # seconds — fallback if no Retry-After header
+
+
+def _retry_delay(e: Exception, attempt: int, label: str) -> float:
+    """Read Retry-After header from Azure 429; fall back to exponential backoff."""
+    try:
+        retry_after = int(e.response.headers.get("Retry-After", 0))
+        if retry_after > 0:
+            logger.warning(f"{label} | Azure Retry-After: {retry_after}s")
+            return float(retry_after)
+    except Exception:
+        pass
+    return _BASE_DELAY * (2 ** (attempt - 1))  # 10s, 20s, 40s, 80s
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -18,7 +30,7 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
     """
     Call client.chat.completions.create with exponential backoff.
     Retries on:
-      - 429 RateLimitError  (Azure TPM/RPM quota hit)
+      - 429 RateLimitError  (Azure TPM/RPM quota hit) — honours Retry-After header
       - 5xx APIStatusError  (transient Azure-side failure)
     All other exceptions (400, 401, 422, etc.) are not transient — raised immediately.
     """
@@ -26,24 +38,24 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
         try:
             return client.chat.completions.create(**kwargs)
 
-        except openai.RateLimitError:
+        except openai.RateLimitError as e:
             if attempt == _MAX_RETRIES:
                 logger.error(f"Generator | rate limited — all {_MAX_RETRIES} attempts exhausted")
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _retry_delay(e, attempt, "Generator")
             logger.warning(
                 f"Generator | rate limited (attempt {attempt}/{_MAX_RETRIES}) "
-                f"— retrying in {delay}s"
+                f"— retrying in {delay:.0f}s"
             )
             time.sleep(delay)
 
         except openai.APIStatusError as e:
             if e.status_code < 500 or attempt == _MAX_RETRIES:
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _BASE_DELAY * (2 ** (attempt - 1))
             logger.warning(
                 f"Generator | API error {e.status_code} (attempt {attempt}/{_MAX_RETRIES}) "
-                f"— retrying in {delay}s"
+                f"— retrying in {delay:.0f}s"
             )
             time.sleep(delay)
 
