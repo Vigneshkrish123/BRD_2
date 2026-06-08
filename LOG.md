@@ -4,6 +4,109 @@ Detailed record of every step built, decision made, and change applied.
 
 ---
 
+## Session — 8 June 2026
+
+---
+
+### Change — Token limit raised to 100k, model updated to gpt-4o
+
+**Problem:** User uploads 18–20 Teams transcript files totalling ~76,862 tokens.
+Previous hard limit was 20,000 tokens — rejected with "Transcript is 76,862 tokens — limit is 20,000."
+
+**Root cause:** `cost_guard.py` had `MAX_INPUT_TOKENS = 20_000` and used the
+`gpt-4o-mini` tiktoken encoder.
+
+**Fix:**
+- `cost_guard.py`: `MAX_INPUT_TOKENS` raised to `100_000`
+- `cost_guard.py`: encoder switched from `gpt-4o-mini` to `gpt-4o`
+- `extractor.py`: `max_tokens` raised from `4096` to `8192` (larger extracted JSON
+  needed for bigger combined inputs)
+- `generator.py`: `max_tokens` raised from `6000` to `8000`
+- `UI/streamlit_app.py`: per-file upload cap raised from 5MB to 20MB; decoded char
+  limit raised from 2MB to 10MB; sidebar caption updated to "100k tokens/input"
+- `startup.sh`: `--server.maxUploadSize` raised from `5` to `20`
+
+**Rationale:** gpt-4o has a 128k context window. 100k input leaves ~28k for system
+prompts and output — sufficient margin. Multiple files are joined and processed as
+one combined text in a single extraction call.
+
+---
+
+### Feature — Multi-format file support (PDF, Word, PPT, Excel)
+
+**Problem:** App only accepted `.txt` (Teams transcripts). User needs to also upload
+supporting documents: requirements specs, slide decks, Excel trackers, PDFs.
+
+**Wrong approach (what was tried before):** `win32com` / `pywin32` COM automation —
+requires Microsoft Office installed on the server. Azure App Service does not have
+Office. Also tried `LibreOffice` subprocess — not available on App Service either.
+
+**Correct approach:** Pure-Python libraries that read file formats directly:
+- `.pdf`  → `pypdf` — parses PDF internals, no poppler/ghostscript needed
+- `.docx` → `python-docx` — already a project dep, now also used for reading
+- `.pptx` → `python-pptx` — reads Open XML format directly
+- `.xlsx` → `openpyxl` — reads Open XML format directly
+
+**New file: `app/file_parser.py`**
+- `extract_text(filename, raw_bytes) -> str`
+- Routes by extension: `.pdf` / `.docx` / `.pptx` / `.xlsx`
+- `.pdf`: page-by-page text; warns if no text extracted (scanned/image PDFs)
+- `.docx`: all paragraphs + table cell text
+- `.pptx`: all text frames per slide, labelled `[Slide N]`
+- `.xlsx`: all non-empty cells per sheet as `col1 | col2` rows, labelled `[Sheet: name]`
+- Logs filename, count (pages/slides/sheets), and word count per file
+
+**`UI/streamlit_app.py` changes:**
+- File uploader now accepts: `["txt", "pdf", "docx", "pptx", "xlsx"]`
+- **Two distinct processing paths** (critical — prevents silent data loss):
+  - `.txt` files → `clean_transcript()` (Teams cleaner — strips timestamps, speaker
+    lines, fillers; detects speaker names)
+  - All other formats → `file_parser.extract_text()` — raw text preserved, cleaner
+    skipped. **Reason:** `cleaner.py`'s `_SPEAKER_LINE` regex matches any
+    "Title Case Line" (1–5 capitalised words on their own line), which would silently
+    strip every heading and label from Word/PPT/Excel content.
+- All extracted texts combined into one string for the LLM pipeline
+- Speakers collected from `.txt` files only, passed to extractor
+
+**`requirements.txt` additions:** `pypdf>=4.0.0`, `python-pptx>=0.6.23`, `openpyxl>=3.1.0`
+
+---
+
+### Fix — Rate limit retries not waiting long enough
+
+**Problem:** Extractor hitting Azure 429 rate limit. All 3 retry attempts exhausted
+in under 15 seconds; Azure kept blocking because the retry waits (2s, 4s, 8s) were
+far shorter than the actual quota reset time.
+
+**Root cause:** Azure sends a `Retry-After: 60` (or `Retry-After: 30`) header on 429
+responses telling the caller exactly how long to wait. Both `extractor.py` and
+`generator.py` ignored this header entirely and used `_BASE_DELAY ** attempt` (2s, 4s, 8s).
+
+**Fix (both `extractor.py` and `generator.py`):**
+- New `_retry_delay(e, attempt, label)` helper: reads `e.response.headers["Retry-After"]`
+  from the exception; if present and > 0, sleeps for exactly that duration
+- Fallback if header absent: exponential backoff `10s × 2^(attempt-1)` = 10s / 20s / 40s / 80s
+- `_MAX_RETRIES` raised from `3` to `5`
+- `_BASE_DELAY` raised from `2` to `10` (fallback base)
+- Logs `"Azure Retry-After: Ns"` when header is present so it's visible in App Service logs
+
+**Required Azure action (separate from code):** If rate limiting persists even after
+the fix, the Azure AI Foundry TPM quota is too low for the input size. With ~76k token
+inputs, a single extraction call uses ~84k tokens. TPM quota must be set to at least
+**150,000 TPM** in AI Foundry portal → Deployments → gpt-4o → Edit.
+
+---
+
+### Fix — Startup path case error
+
+**Problem:** `startup.sh` referenced `ui/streamlit_app.py` (lowercase). The actual
+folder is `UI/` (uppercase). On Linux (Azure App Service) the filesystem is
+case-sensitive — `ui/` and `UI/` are different paths. App would fail to start.
+
+**Fix:** `startup.sh` updated: `ui/streamlit_app.py` → `UI/streamlit_app.py`
+
+---
+
 ## Session — 24 May 2026
 
 ---
@@ -32,7 +135,7 @@ Account: `vigneshkrish1978@gmail.com` | Subscription: `Azure subscription 1`.
 
 **Azure OpenAI:**
 - Endpoint: Retrieved from AI Foundry → Libraries → Azure OpenAI (not the Foundry project endpoint)
-- Deployment: `gpt-4o-mini`
+- Deployment: `gpt-4o-mini` (updated to `gpt-4o` in June 2026 session)
 - API version: `2024-12-01-preview`
 
 **Final `.env` values:**
@@ -41,7 +144,7 @@ AZURE_KEYVAULT_URL=https://aiagentsdevelopment.vault.azure.net/
 AZURE_API_KEY_SECRET_NAME=GPT-4o-mini-Api
 AZURE_OPENAI_ENDPOINT=https://azuresouthindia.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
-AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ```
 
 **Mistake to avoid:** The Foundry project endpoint
@@ -92,16 +195,13 @@ Delegate cost protection to Azure AI Foundry TPM/RPM quotas (set in portal).
 **What remains:**
 - `check_input_size()` — token guard only, pure computation, no file I/O
 
-**Required Azure action:** Set TPM quota to 40,000 and RPM to 10 on the
-`gpt-4o-mini` deployment in AI Foundry portal. This is now the primary cost wall.
-
 ---
 
 ### Fix — `app/extractor.py` and `app/generator.py`
 
 **Problem:** Both files imported `record_usage` from `cost_guard` which no longer exists.
 **Fix:** Removed `from app.cost_guard import record_usage` import and
-`record_usage(...)` call from both files. No other changes to these files in this step.
+`record_usage(...)` call from both files.
 
 ---
 
@@ -120,20 +220,20 @@ Delegate cost protection to Azure AI Foundry TPM/RPM quotas (set in portal).
 
 ---
 
-### Discovery — `ui/auth.py` (stale duplicate)
+### Discovery — `UI/auth.py` (stale duplicate)
 
-**Finding:** `ui/auth.py` (4KB, dated 5/18/2026) exists in the `UI/` folder.
+**Finding:** `UI/auth.py` exists in the `UI/` folder.
 Its content is identical to `app/auth.py` — same imports, same `verify()` function.
-`streamlit_app.py` imports from `app.auth`, not `ui.auth` — the file in `ui/` is unreferenced.
+`streamlit_app.py` imports from `app.auth`, not `UI.auth` — the file is unreferenced.
 
-**Decision:** Safe to delete `ui/auth.py`. It was likely created during initial scaffolding
-before the final import structure was settled and never removed.
+**Decision:** Safe to delete `UI/auth.py`. Created during initial scaffolding before
+the final import structure was settled and never removed.
 
-**Action required:** Delete `ui/auth.py`.
+**Action required:** Delete `UI/auth.py`.
 
 ---
 
-### End-to-End Test Result
+### End-to-End Test Result (May 2026)
 
 Pipeline ran successfully locally:
 - Auth → Key Vault → Azure OpenAI: ✅
@@ -144,51 +244,6 @@ Pipeline ran successfully locally:
 
 ---
 
-## Current File Inventory
-
-| File | Status | Purpose |
-|---|---|---|
-| `app/__init__.py` | ✅ | Package marker |
-| `app/auth.py` | ✅ | Azure auth gate |
-| `app/cleaner.py` | ✅ | Transcript cleaning |
-| `app/cost_guard.py` | ✅ | Token guard only (rate limit/budget removed) |
-| `app/extractor.py` | ✅ | LLM Call 1 — with retry + hard delimiters |
-| `app/formatter.py` | ✅ | BRD JSON → .docx |
-| `app/generator.py` | ✅ | LLM Call 2 — with retry |
-| `app/keyvault.py` | ✅ | Azure Key Vault client |
-| `app/prompts.py` | ✅ | LLM system prompts (rewritten — content filter fix) |
-| `app/sanitizer.py` | ✅ | Injection filtering + full Pydantic output validation |
-| `ui/auth.py` | ⚠️ | Stale duplicate of app/auth.py — delete this file |
-| `ui/streamlit_app.py` | ✅ | Streamlit UI |
-| `startup.sh` | ✅ | Azure App Service startup |
-| `requirements.txt` | ✅ | pip dependencies (defusedxml added) |
-| `pyproject.toml` | ✅ | Poetry config |
-| `.env.example` | ✅ | Env var template |
-| `.gitignore` | ✅ | Git exclusions |
-| `CLAUDE.md` | ✅ | Architecture reference |
-| `LOG.md` | ✅ | This file |
-
----
-
-## Pending / Next Steps
-
-- [ ] Delete `ui/auth.py` (stale duplicate of app/auth.py)
-- [ ] Resolve Python 3.14 vs 3.11 mismatch on local machine
-- [ ] Set TPM quota (40,000) and RPM quota (10) in Azure AI Foundry portal
-- [ ] Azure App Service: set all 5 Application Settings (env vars)
-- [ ] Azure App Service: enable Managed Identity (System Assigned)
-- [ ] Azure App Service: assign Key Vault Secrets User role to App Service identity
-- [ ] Azure App Service: enable HTTPS Only + Managed Certificate
-- [ ] Azure App Service: set startup command to `bash startup.sh`
-- [ ] ZIP deploy to Azure App Service
-- [ ] End-to-end test on App Service
-- [ ] Easy Auth (Entra ID login wall) — deferred, needed for true per-user rate limiting
-- [ ] VAPT testing
-
----
-
----
-
 ## Session — 18 May 2026
 
 ---
@@ -196,7 +251,7 @@ Pipeline ran successfully locally:
 ### Step 1 — Project Scaffold
 
 **Built:**
-- Folder structure: `transcript_to_brd/app/`, `ui/`, `outputs/`, `scripts/`
+- Folder structure: `transcript_to_brd/app/`, `UI/`, `outputs/`, `scripts/`
 - `pyproject.toml` — Poetry config, Python 3.11
 - `.env.example` — template for all required env vars
 - `.gitignore` — covers `.env`, `outputs/`, `*.docx`, `__pycache__`
@@ -249,12 +304,9 @@ any code changes.
 - `GENERATION_SYSTEM` — generation prompt expanding extracted data into BRD sections
 
 **Key decisions:**
-- Explicit schema definition in both prompts to constrain gpt-4o-mini output shape
+- Explicit schema definition in both prompts to constrain LLM output shape
 - Acceptance criteria required on every functional requirement
 - Explicitly prohibits fabricating requirements not in source data
-
-**Both prompts end with:** "Return ONLY valid JSON. No markdown. No preamble."
-— prevents gpt-4o-mini from wrapping output in code fences which breaks json.loads()
 
 ---
 
@@ -262,42 +314,10 @@ any code changes.
 
 **Built:**
 - Two responsibilities: injection filtering (pre-LLM) and schema enforcement (post-LLM)
-
-**`sanitize_transcript(text)`:**
-- 12 injection/jailbreak patterns across four categories:
-  - Direct instruction overrides: "ignore previous instructions", "forget everything",
-    "new instructions:", "override system"
-  - Role/persona hijacking: "pretend you are", "your new role", "DAN", "jailbreak"
-  - JSON/schema injection: `"role": "system"`, `<script>`, `<system>` tags
-  - Prompt leak attempts: "repeat your system prompt", "what are your instructions"
-- Patterns deliberately excluded to avoid false positives on business speech:
-  "act as", "you are now", "system prompt"
-- Matched patterns replaced with `[REDACTED]`; all matches returned as warnings
-
-**`sanitize_speakers(speakers)`:**
-- Strips non-printable / special chars from speaker names, caps at 128 chars
-
-**`ExtractedData` Pydantic model (LLM Call 1 output):**
-- Fields: project_name, meeting_date, business_context, business_objectives,
-  stakeholders (name/role/interest), functional_requirements,
-  non_functional_requirements, in_scope, out_of_scope, assumptions, constraints,
-  open_questions, decisions_made, action_items (item/owner/due_date), risks
-- `extra="ignore"` — unexpected LLM keys discarded silently
-
-**`BRDDocument` Pydantic model (LLM Call 2 output):**
-- Full document schema with sub-models: DocumentInfo, BRDScope, StakeholderBRD,
-  BusinessObjective, FunctionalRequirement, NonFunctionalRequirement,
-  Risk, OpenQuestion, ActionItemBRD
-- ID format validators: BO-NNN, FR-NNN, NFR-NNN, R-NNN, OQ-NNN, AI-NNN
-- Priority/impact constrained to: High, Medium, Low
-- NFR category normalised to title case and checked against 16-entry allowlist;
-  unrecognised values kept as-is with warning (never fail the run)
-- `renumber_ids()` model_validator (post-construction): silently corrects
-  non-sequential/duplicate IDs, logs a warning per correction, never raises
-- `validate_extracted()` and `validate_brd()` wrap ValidationError in plain
-  ValueError — Pydantic internals never reach the UI
-
-**Added to pyproject.toml:** `pydantic >= 2.0`
+- 12 injection/jailbreak patterns; patterns deliberately scoped to avoid false positives
+  on legitimate business speech
+- Full Pydantic v2 schema validation on both LLM call outputs
+- `renumber_ids()` model validator silently corrects non-sequential IDs from LLM
 
 ---
 
@@ -305,16 +325,8 @@ any code changes.
 
 **Built:**
 - `extract(cleaned_text, speakers, client, deployment)` → dict
-- `temperature=0.1` — near-zero for consistent extraction
-- `max_tokens=4096`
-- `response_format={"type": "json_object"}` — Azure OpenAI JSON mode
-- Calls `sanitize_transcript()` and `sanitize_speakers()` before building prompt
-- Hard structural delimiters wrap the transcript: `<<<TRANSCRIPT_BEGIN>>>` /
-  `<<<TRANSCRIPT_END>>>` — user message labels content as untrusted
-- `_call_with_retry()`: exponential backoff, 3 attempts, delays 2s/4s/8s;
-  retries on RateLimitError (429) and APIStatusError 5xx only; 4xx not retried
-- Validates output via `sanitizer.validate_extracted()` before returning
-- Logs FR count, NFR count, stakeholder count, token usage on completion
+- Hard structural delimiters wrap the transcript (`<<<TRANSCRIPT_BEGIN>>>` / `<<<TRANSCRIPT_END>>>`)
+- `_call_with_retry()`: retry on 429 and 5xx; 4xx not retried
 
 ---
 
@@ -322,123 +334,51 @@ any code changes.
 
 **Built:**
 - `generate(extracted_data, client, deployment)` → dict
-- `temperature=0.1` (set at 0.3 initially, lowered to 0.1 to reduce schema deviation)
-- `max_tokens=6000` — BRD output is longer than extraction JSON
-- Re-serializes extracted_data via `json.dumps(ensure_ascii=True)` before
-  building next prompt — never passes raw LLM output directly
-- Injects today's date into user message for timeline reasoning
-- `_call_with_retry()`: same retry pattern as extractor.py
-- Validates output via `sanitizer.validate_brd()` before returning
-- Logs FR count, token usage on completion
+- Re-serializes via `json.dumps(ensure_ascii=True)` before building next prompt
+- Injects today's date for timeline reasoning
 
 ---
 
 ### Step 8 — `app/formatter.py`
 
 **Initial build:** Node.js (`scripts/format_brd.js`) using `docx` npm package.
-
 **Revision:** User requested pure Python. Node.js removed entirely.
-`scripts/` directory is now unused.
 
 **Final build — pure python-docx:**
-- `format_docx(brd_data, output_path)` → str (absolute path)
-- Low-level XML helpers (python-docx has no native API for these):
-  - `_set_cell_bg()` — cell background via `w:shd` OxmlElement
-  - `_set_cell_border()` — cell borders via `w:tcBorders`
-  - `_cell_padding()` — cell margins via `w:tcMar`
-  - `_heading_border()` — blue bottom border on Heading 1 paragraphs
-
-**Document structure (11 sections):**
-1. Title page (project name, version, status, date, prepared by)
-2. Executive Summary (page break after)
-3. Project Overview
-4. Scope (In Scope / Out of Scope bullet lists)
-5. Stakeholders (3-column table)
-6. Business Objectives (3-column table)
-7. Functional Requirements (4-column table)
-8. Non-Functional Requirements (4-column table)
-9. Assumptions & Constraints (bullet lists)
-10. Risks (4-column table)
-11. Open Questions (4-column table)
-12. Action Items (4-column table)
-
-**Colour scheme:**
-- Header rows: `#1F3864` (navy)
-- Heading 1: `#2E75B6` (blue) with bottom border
-- Heading 2: `#1F3864` (navy)
-- Alternating rows: `#EBF3FB` (light blue) / white
-- Body text: `#2C2C2C`
-
-**Added to pyproject.toml:** `python-docx >= 1.1.0`
+- `format_docx(brd_data)` → bytes (returned in-memory, never written to disk)
+- Low-level XML helpers for cell background, borders, padding, heading borders
+- 11 BRD sections with styled tables and bullet lists
+- Colour scheme: navy headers, blue headings, alternating light-blue/white rows
 
 ---
 
-### Step 9 — `ui/streamlit_app.py` (initial build)
+### Step 9 — `UI/streamlit_app.py` (initial build)
 
 **Built:**
-- `get_client()` — cached `AzureOpenAI` client via `@st.cache_resource`
-- File uploader (`.txt` only)
+- Auth gate — entire UI gated behind `auth.ok`
+- File uploader (`.txt` only at this stage)
 - Word count + filename metrics display
 - "Generate BRD" button
 - `st.status()` live progress: Clean → Extract → Generate → Format
-- Download button for `.docx` (appears only on success)
-- Per-step error handling with specific failure messages
+- Download button for `.docx`
 
 ---
 
 ### Step 10 — `app/cost_guard.py` (initial build)
 
-**Reason:** Prevent runaway Azure OpenAI spend.
-
-**Three protection layers (initial design):**
-
-1. **Input token guard** (`check_input_size`)
-   - Exact token count via `tiktoken` (gpt-4o-mini tokeniser)
-   - Rejects transcript > 20,000 tokens before any API call
-
-2. **Rate limiter** (`check_rate_limit`)
-   - Max 10 pipeline runs per hour, file-based persistence
-
-3. **Daily circuit breaker** (`check_daily_budget`)
-   - Daily budget: $5.00 USD, resets at midnight
-
-**Note:** Rate limiter and daily budget later removed in May 24 session
-(ephemeral filesystem on App Service made them unreliable).
-
-**Added to pyproject.toml:** `tiktoken >= 0.7.0`
+Three protection layers initially (rate limiter and budget later removed in May 24 session):
+1. Input token guard (`check_input_size`) — `tiktoken`, 20,000 token limit
+2. Rate limiter (`check_rate_limit`) — 10 runs/hour, file-based
+3. Daily circuit breaker (`check_daily_budget`) — $5/day
 
 ---
 
 ### Step 11 — `app/auth.py`
 
-**Reason:** Prevent file upload and LLM calls before Azure credentials are verified.
-
-**Two-step verification:**
-1. Key Vault fetch — confirms `az login` / Managed Identity + vault config
-2. Azure OpenAI ping — 1-token completion confirms key + endpoint + deployment
-
-**Returns:** `AuthResult(ok: bool, client: AzureOpenAI | None, error: str)`
-
-**Specific error messages for:**
-- Missing env vars (EnvironmentError)
-- Key Vault unreachable (expired az login, wrong URL)
-- Wrong API key (AuthenticationError → 401)
-- Wrong endpoint (APIConnectionError)
-
-**Streamlit integration:**
-- Auth runs once per session, cached in `st.session_state["auth"]`
-- Nothing renders (no file uploader, no button) until `auth.ok == True`
-- On failure: error message + fix instructions displayed, `st.stop()` called
-
----
-
-### Step 12 — `ui/streamlit_app.py` (auth + cost integration)
-
-**Changes:**
-- Auth gate added at top — entire UI gated behind `auth.ok`
-- `get_client()` removed — client now comes from `auth.client`
-- Pre-flight cost guards called before pipeline starts
-- Cost sidebar added (later removed in May 24 session)
+**Built:**
+- Two-step verification: Key Vault fetch + Azure OpenAI ping
+- Returns `AuthResult(ok, client, error)`
+- Cached in `st.session_state["auth"]` — runs once per session
 
 ---
 
@@ -447,21 +387,52 @@ any code changes.
 **Decision:** Docker + Nginx approach dropped. Azure App Service handles
 TLS termination and reverse proxy natively.
 
-| Original plan | Azure App Service equivalent |
-|---|---|
-| Nginx reverse proxy | Azure front-end infrastructure (automatic) |
-| TLS termination | App Service HTTPS Only + Managed Certificate |
-| client_max_body_size | `--server.maxUploadSize 5` (Streamlit flag) |
-
 **Files built:**
 
 `startup.sh`
 - Startup command for Azure App Service
-- Runs: `streamlit run ui/streamlit_app.py --server.port ${PORT:-8000} ...`
-- `--server.maxUploadSize 5` — 5MB cap at Streamlit level
+- Runs: `streamlit run UI/streamlit_app.py --server.port ${PORT:-8000} ...`
 - `--server.enableXsrfProtection true` — CSRF protection on
 
 `requirements.txt`
-- Flat pip requirements exported from pyproject.toml
-- Used by Azure Oryx build system (`pip install -r requirements.txt`)
-- Poetry not supported natively on Azure App Service
+- Flat pip requirements for Azure Oryx build system
+
+---
+
+## Current File Inventory
+
+| File | Status | Purpose |
+|---|---|---|
+| `app/__init__.py` | ✅ | Package marker |
+| `app/auth.py` | ✅ | Azure auth gate |
+| `app/cleaner.py` | ✅ | Teams .txt transcript cleaning only |
+| `app/cost_guard.py` | ✅ | Token guard — 100k limit, gpt-4o encoder |
+| `app/extractor.py` | ✅ | LLM Call 1 — Retry-After aware, 5 attempts, 8192 output tokens |
+| `app/file_parser.py` | ✅ | Pure-Python text extraction for PDF/Word/PPT/Excel |
+| `app/formatter.py` | ✅ | BRD JSON → .docx |
+| `app/generator.py` | ✅ | LLM Call 2 — Retry-After aware, 5 attempts, 8000 output tokens |
+| `app/keyvault.py` | ✅ | Azure Key Vault client |
+| `app/prompts.py` | ✅ | LLM system prompts (rewritten — content filter fix) |
+| `app/sanitizer.py` | ✅ | Injection filtering + full Pydantic output validation |
+| `UI/auth.py` | ⚠️ | Stale duplicate of app/auth.py — delete this file |
+| `UI/streamlit_app.py` | ✅ | Streamlit UI — multi-format upload, dual parse path |
+| `startup.sh` | ✅ | Azure App Service startup (UI/ uppercase) |
+| `requirements.txt` | ✅ | pip deps — pypdf, python-pptx, openpyxl added |
+| `pyproject.toml` | ✅ | Poetry config |
+| `.env.example` | ✅ | Env var template |
+| `.gitignore` | ✅ | Git exclusions |
+| `CLAUDE.md` | ✅ | Architecture reference |
+| `LOG.md` | ✅ | This file |
+
+---
+
+## Pending / Next Steps
+
+- [ ] Delete `UI/auth.py` (stale duplicate of app/auth.py)
+- [ ] Raise Azure AI Foundry TPM quota to 150,000+ on gpt-4o deployment
+- [ ] Update `AZURE_OPENAI_DEPLOYMENT` env var to `gpt-4o` on App Service
+- [ ] Resolve Python 3.14 vs 3.11 mismatch on local machine
+- [ ] Azure App Service: verify all 5 Application Settings match updated .env
+- [ ] End-to-end test on App Service with 18–20 file upload
+- [ ] Easy Auth (Entra ID login wall) — deferred, needed for true per-user rate limiting
+- [ ] VAPT testing
