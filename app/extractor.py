@@ -11,8 +11,9 @@ from app.sanitizer import sanitize_transcript, sanitize_speakers, validate_extra
 _TRANSCRIPT_START = "<<<TRANSCRIPT_BEGIN>>>"
 _TRANSCRIPT_END   = "<<<TRANSCRIPT_END>>>"
 
-_MAX_RETRIES   = 3
-_BASE_DELAY    = 2  # seconds — delay doubles on each attempt (2s, 4s, 8s)
+_MAX_RETRIES   = 5
+_BASE_DELAY    = 10   # seconds — exponential: 10s, 20s, 40s, 80s, 160s
+_MAX_DELAY     = 120  # cap so we never wait more than 2 minutes
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -21,7 +22,7 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
     """
     Call client.chat.completions.create with exponential backoff.
     Retries on:
-      - 429 RateLimitError  (Azure TPM/RPM quota hit)
+      - 429 RateLimitError  (Azure TPM/RPM quota hit) — honours Retry-After header
       - 5xx APIStatusError  (transient Azure-side failure)
     All other exceptions (400, 401, 422, etc.) are not transient — raised immediately.
     """
@@ -33,7 +34,11 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
             if attempt == _MAX_RETRIES:
                 logger.error(f"Extractor | rate limited — all {_MAX_RETRIES} attempts exhausted")
                 raise
-            delay = _BASE_DELAY ** attempt
+            # Honour Retry-After header if Azure provides it; else exponential backoff.
+            retry_after = None
+            if hasattr(e, "response") and e.response is not None:
+                retry_after = e.response.headers.get("Retry-After")
+            delay = int(retry_after) if retry_after else min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
             logger.warning(
                 f"Extractor | rate limited (attempt {attempt}/{_MAX_RETRIES}) "
                 f"— retrying in {delay}s"
@@ -42,9 +47,8 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
 
         except openai.APIStatusError as e:
             if e.status_code < 500 or attempt == _MAX_RETRIES:
-                # 4xx errors are not transient — re-raise immediately
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
             logger.warning(
                 f"Extractor | API error {e.status_code} (attempt {attempt}/{_MAX_RETRIES}) "
                 f"— retrying in {delay}s"
@@ -96,7 +100,7 @@ def extract(
             {"role": "user",   "content": user_message},
         ],
         temperature=0.1,
-        max_tokens=8192,
+        max_tokens=4096,
         response_format={"type": "json_object"},
     )
 
@@ -107,7 +111,7 @@ def extract(
 
     logger.info(
         f"Extractor | done | "
-        f"FR={len(data.get('functional_requirements', []))} | "
+        f"UC={len(data.get('use_cases', []))} | "
         f"NFR={len(data.get('non_functional_requirements', []))} | "
         f"tokens in={response.usage.prompt_tokens} out={response.usage.completion_tokens}"
     )
