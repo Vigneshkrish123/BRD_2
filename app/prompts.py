@@ -56,6 +56,7 @@ Extraction rules:
 - Speakers list will be provided — use it to identify stakeholders accurately.
 - Field values must be plain text only — no markdown, no code, no HTML.
 - Maximum field value length: 2000 characters. Truncate if necessary.
+- Preserve exact terminology, product names, numeric values, formulas, and domain-specific language verbatim as spoken. Do not paraphrase technical content.
 """.strip()
 
 
@@ -144,11 +145,12 @@ Return a valid JSON object using exactly this schema. No markdown, no explanatio
 }
 
 Generation rules:
-- Use formal business writing throughout. Active voice where possible.
+- Write in formal business style, but anchor every requirement to the specific domain language, products, and numbers from the source data. A requirement that could apply to any project is a failed requirement. Active voice where possible.
 - Every requirement must be unambiguous and independently testable.
 - Assign a priority to every requirement based on context clues.
 - Expand and elaborate the raw extracted data — write complete, professional sentences.
 - Do not fabricate requirements not present in the source data.
+- Functional requirements must reference the specific system, product, or process named in the source — never genericize to "the system" when a specific subsystem is named.
 - IDs must be strictly sequential: BO-001, BO-002 / FR-001, FR-002 / NFR-001 etc.
 - Field values must be plain text only — no markdown, no code, no HTML.
 - priority values must be exactly one of: High, Medium, Low (case-sensitive).
