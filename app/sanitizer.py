@@ -168,6 +168,7 @@ class StakeholderBRD(BaseModel):
 class BusinessObjective(BaseModel):
     id: str
     description: str
+    kpi: str = ""
     success_criteria: str = ""
     model_config = {"extra": "ignore"}
 
@@ -179,10 +180,18 @@ class BusinessObjective(BaseModel):
         return v
 
 
+VALID_FR_CATEGORIES = {
+    "UI", "API", "Data", "Integration", "Reporting",
+    "Workflow", "Authentication", "Notification", "Configuration", "Other",
+}
+
+
 class FunctionalRequirement(BaseModel):
     id: str
+    category: str = "Other"
     description: str
     priority: str
+    rationale: str = ""
     acceptance_criteria: str = ""
     model_config = {"extra": "ignore"}
 
@@ -192,6 +201,19 @@ class FunctionalRequirement(BaseModel):
         if not re.match(r"^FR-\d{3}$", v):
             raise ValueError(f"Invalid FR id format: {v!r}")
         return v
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v):
+        normalised = v.strip().title() if v else "Other"
+        # Handle known casing variants
+        upper_check = v.strip().upper()
+        if upper_check in {"UI", "API"}:
+            return upper_check
+        if normalised in VALID_FR_CATEGORIES:
+            return normalised
+        logger.warning(f"Unrecognised FR category {v!r} — keeping as-is")
+        return v.strip() or "Other"
 
     @field_validator("priority")
     @classmethod
@@ -236,6 +258,7 @@ class NonFunctionalRequirement(BaseModel):
 class Risk(BaseModel):
     id: str
     description: str
+    probability: str = "Medium"
     impact: str
     mitigation: str = ""
     model_config = {"extra": "ignore"}
@@ -247,11 +270,11 @@ class Risk(BaseModel):
             raise ValueError(f"Invalid Risk id format: {v!r}")
         return v
 
-    @field_validator("impact")
+    @field_validator("probability", "impact")
     @classmethod
-    def validate_impact(cls, v):
+    def validate_hml(cls, v):
         if v not in ("High", "Medium", "Low"):
-            raise ValueError(f"Invalid impact: {v!r}")
+            raise ValueError(f"Invalid value: {v!r} — must be High, Medium, or Low")
         return v
 
 

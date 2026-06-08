@@ -225,16 +225,18 @@ def _section_stakeholders(doc, brd):
 
 def _section_objectives(doc, brd):
     _add_heading1(doc, "5. Business Objectives")
-    rows = [[o.get("id"), o.get("description"), o.get("success_criteria")]
+    rows = [[o.get("id"), o.get("description"), o.get("kpi", ""), o.get("success_criteria")]
             for o in brd.get("business_objectives", [])]
-    _add_table(doc, ["ID", "Description", "Success Criteria"], [2, 7, 7], rows)
+    _add_table(doc, ["ID", "Description", "KPI", "Success Criteria"], [1.5, 5, 4, 5.5], rows)
 
 
 def _section_fr(doc, brd):
     _add_heading1(doc, "6. Functional Requirements")
-    rows = [[f.get("id"), f.get("description"), f.get("priority"), f.get("acceptance_criteria")]
-            for f in brd.get("functional_requirements", [])]
-    _add_table(doc, ["ID", "Description", "Priority", "Acceptance Criteria"], [1.5, 5.5, 2, 7], rows)
+    rows = [
+        [f.get("id"), f.get("category", ""), f.get("priority"), f.get("description"), f.get("rationale", ""), f.get("acceptance_criteria")]
+        for f in brd.get("functional_requirements", [])
+    ]
+    _add_table(doc, ["ID", "Category", "Priority", "Description", "Rationale", "Acceptance Criteria"], [1.5, 2.5, 2, 4.5, 3, 4.5], rows)
 
 
 def _section_nfr(doc, brd):
@@ -256,9 +258,9 @@ def _section_assumptions(doc, brd):
 
 def _section_risks(doc, brd):
     _add_heading1(doc, "9. Risks")
-    rows = [[r.get("id"), r.get("description"), r.get("impact"), r.get("mitigation")]
+    rows = [[r.get("id"), r.get("description"), r.get("probability", ""), r.get("impact"), r.get("mitigation")]
             for r in brd.get("risks", [])]
-    _add_table(doc, ["ID", "Description", "Impact", "Mitigation"], [1.5, 5, 2, 7.5], rows)
+    _add_table(doc, ["ID", "Description", "Probability", "Impact", "Mitigation"], [1.5, 4.5, 2, 2, 6], rows)
 
 
 def _section_open_questions(doc, brd):
