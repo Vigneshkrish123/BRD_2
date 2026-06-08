@@ -10,10 +10,26 @@ from app.prompts import GENERATION_SYSTEM, USE_CASE_SYSTEM
 from app.sanitizer import validate_brd
 
 
-_MAX_RETRIES   = 3
-_BASE_DELAY    = 2   # seconds — doubles on each attempt (2s, 4s, 8s)
-_UC_BATCH_SIZE = 3   # use cases per generation call
-_UC_MAX_WORKERS = 5  # parallel UC batch calls (stay well under 150k TPM)
+_MAX_RETRIES      = 5
+_RETRY_AFTER_MIN  = 30
+_RETRY_AFTER_MAX  = 120
+_SERVER_ERR_DELAY = 10
+_UC_BATCH_SIZE    = 3   # use cases per generation call
+_UC_MAX_WORKERS   = 5   # parallel UC batch calls (stay well under 150k TPM)
+
+
+def _retry_delay_from_error(e: openai.RateLimitError, attempt: int) -> float:
+    wait = None
+    try:
+        headers = e.response.headers if e.response is not None else {}
+        raw = headers.get("retry-after") or headers.get("x-ratelimit-reset-requests")
+        if raw:
+            wait = float(raw)
+    except Exception:
+        pass
+    if wait is None:
+        wait = min(_RETRY_AFTER_MIN * (1.5 ** (attempt - 1)), _RETRY_AFTER_MAX)
+    return max(wait, _RETRY_AFTER_MIN)
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────────
@@ -23,21 +39,21 @@ def _call_with_retry(client: AzureOpenAI, **kwargs) -> object:
         try:
             return client.chat.completions.create(**kwargs)
 
-        except openai.RateLimitError:
+        except openai.RateLimitError as e:
             if attempt == _MAX_RETRIES:
                 logger.error(f"Generator | rate limited — all {_MAX_RETRIES} attempts exhausted")
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _retry_delay_from_error(e, attempt)
             logger.warning(
                 f"Generator | rate limited (attempt {attempt}/{_MAX_RETRIES}) "
-                f"— retrying in {delay}s"
+                f"— retrying in {delay:.0f}s"
             )
             time.sleep(delay)
 
         except openai.APIStatusError as e:
             if e.status_code < 500 or attempt == _MAX_RETRIES:
                 raise
-            delay = _BASE_DELAY ** attempt
+            delay = _SERVER_ERR_DELAY * (2 ** (attempt - 1))
             logger.warning(
                 f"Generator | API error {e.status_code} (attempt {attempt}/{_MAX_RETRIES}) "
                 f"— retrying in {delay}s"
