@@ -20,11 +20,12 @@ from app.extractor import extract
 from app.generator import generate
 from app.formatter import format_docx
 from app.cost_guard import check_input_size
+from app.file_parser import extract_text
 
 # ── Upload size caps ──────────────────────────────────────────────────────────
 
-_MAX_UPLOAD_BYTES  = 5 * 1024 * 1024
-_MAX_DECODED_CHARS = 2 * 1024 * 1024
+_MAX_UPLOAD_BYTES  = 20 * 1024 * 1024
+_MAX_DECODED_CHARS = 10 * 1024 * 1024
 _MAX_EXPAND_RATIO  = 10
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -76,7 +77,7 @@ with st.sidebar:
     st.header("📄 BRD Agent")
     st.divider()
     st.caption(f"👤 {username}")
-    st.caption(f"Limit: 20k tokens/input")
+    st.caption(f"Limit: 100k tokens/input")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -118,25 +119,37 @@ st.success("🔐 Authenticated with Azure")
 
 # ── File upload ───────────────────────────────────────────────────────────────
 
-st.caption("Upload one or more Teams meeting transcripts (.txt) and download a combined structured BRD (.docx).")
+st.caption(
+    "Upload Teams transcripts (.txt) or supporting documents "
+    "(.pdf, .docx, .pptx, .xlsx) — all files are combined into one BRD."
+)
+
+_TXT_TYPES  = {".txt"}
+_DOC_TYPES  = {".pdf", ".docx", ".pptx", ".xlsx"}
+_ALL_TYPES  = _TXT_TYPES | _DOC_TYPES
 
 uploaded_files = st.file_uploader(
-    "Upload transcript(s)",
-    type=["txt"],
+    "Upload files",
+    type=["txt", "pdf", "docx", "pptx", "xlsx"],
     accept_multiple_files=True,
-    help="Teams → ... → Download > Transcript (.txt). You can select multiple files.",
+    help="Teams transcripts (.txt) + any supporting docs (.pdf, .docx, .pptx, .xlsx).",
 )
 
 if not uploaded_files:
-    st.info("Waiting for at least one transcript file.")
+    st.info("Waiting for at least one file.")
     st.stop()
 
-# ── Size guards (applied per-file, then to combined text) ────────────────────
+# ── Per-file extraction ───────────────────────────────────────────────────────
+# .txt files → Teams transcript cleaner (strips timestamps, speaker lines, fillers)
+# Other types → file_parser text extraction (pure Python, no Office required)
+# Both paths produce plain text that feeds the same LLM pipeline.
 
-parts: list[str] = []
+transcript_parts: list[str] = []   # cleaned text segments
+all_speakers:     list[str] = []   # speakers detected from .txt files only
 
 for f in uploaded_files:
     raw_bytes = f.getvalue()
+    ext = f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
 
     if len(raw_bytes) > _MAX_UPLOAD_BYTES:
         st.error(
@@ -145,27 +158,45 @@ for f in uploaded_files:
         )
         st.stop()
 
-    text = raw_bytes.decode("utf-8", errors="ignore")
+    if ext == "txt":
+        # Teams transcript path — decode + size guard + cleaner
+        raw_text_file = raw_bytes.decode("utf-8", errors="ignore")
 
-    if len(text) > _MAX_DECODED_CHARS:
-        st.error(
-            f"**{f.name}** decoded content too large ({len(text):,} chars). "
-            f"Maximum is {_MAX_DECODED_CHARS:,} characters per file."
-        )
-        st.stop()
+        if len(raw_text_file) > _MAX_DECODED_CHARS:
+            st.error(
+                f"**{f.name}** decoded content too large ({len(raw_text_file):,} chars). "
+                f"Maximum is {_MAX_DECODED_CHARS:,} characters per file."
+            )
+            st.stop()
 
-    _expand = len(text) / max(len(raw_bytes), 1)
-    if _expand > _MAX_EXPAND_RATIO:
-        st.error(
-            f"**{f.name}** expansion ratio {_expand:.1f}× exceeds limit ({_MAX_EXPAND_RATIO}×). "
-            "Possible compressed or binary content."
-        )
-        st.stop()
+        _expand = len(raw_text_file) / max(len(raw_bytes), 1)
+        if _expand > _MAX_EXPAND_RATIO:
+            st.error(
+                f"**{f.name}** expansion ratio {_expand:.1f}× exceeds limit ({_MAX_EXPAND_RATIO}×). "
+                "Possible compressed or binary content."
+            )
+            st.stop()
 
-    parts.append(text)
+        transcript_parts.append(raw_text_file)
 
-# Join transcripts with a clear separator so the cleaner sees them as one stream
-raw_text = "\n\n".join(parts)
+    else:
+        # Document path — pure-Python extraction, no Teams cleaner
+        try:
+            doc_text = extract_text(f.name, raw_bytes)
+        except Exception as e:
+            st.error(f"Could not extract text from **{f.name}**: {e}")
+            st.stop()
+
+        if not doc_text.strip():
+            st.warning(
+                f"**{f.name}** yielded no extractable text. "
+                "If it is a scanned PDF, text extraction is not supported."
+            )
+        else:
+            transcript_parts.append(doc_text)
+
+# Combine all text with clear per-file separators
+raw_text = "\n\n".join(transcript_parts)
 
 word_count = len(raw_text.split())
 file_names = ", ".join(f.name for f in uploaded_files)
@@ -197,20 +228,44 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
 
         st.write(f"🔒 Input ok — {token_count:,} tokens")
 
-        st.write("🧹 Cleaning transcript...")
-        try:
-            cleaned, speakers = clean_transcript(raw_text)
-        except Exception as e:
-            st.error(f"Cleaner failed: {e}")
-            st.stop()
+        # Clean .txt (Teams transcript) content; other formats already extracted as plain text
+        txt_files  = [f for f in uploaded_files if f.name.lower().endswith(".txt")]
+        other_files = [f for f in uploaded_files if not f.name.lower().endswith(".txt")]
+
+        st.write("🧹 Cleaning transcript(s)...")
+        cleaned_parts: list[str] = []
+        all_speakers:  list[str] = []
+
+        for f in txt_files:
+            raw_txt = f.getvalue().decode("utf-8", errors="ignore")
+            try:
+                cleaned_txt, spk = clean_transcript(raw_txt)
+                cleaned_parts.append(cleaned_txt)
+                all_speakers.extend(spk)
+            except Exception as e:
+                st.error(f"Cleaner failed on {f.name}: {e}")
+                st.stop()
+
+        # Non-txt files: text already extracted above — just include as-is
+        for f in other_files:
+            try:
+                doc_text = extract_text(f.name, f.getvalue())
+                if doc_text.strip():
+                    cleaned_parts.append(doc_text)
+            except Exception:
+                pass  # already warned during extraction above
+
+        cleaned      = "\n\n".join(cleaned_parts)
+        all_speakers = sorted(set(all_speakers))
+
         st.write(
             f"✅ Cleaned — **{len(cleaned.split()):,}** words | "
-            f"Speakers: **{', '.join(speakers) if speakers else 'not detected'}**"
+            f"Speakers: **{', '.join(all_speakers) if all_speakers else 'not detected'}**"
         )
 
         st.write("🔍 Extracting requirements...")
         try:
-            extracted = extract(cleaned, speakers, auth.client, deployment)
+            extracted = extract(cleaned, all_speakers, auth.client, deployment)
         except Exception as e:
             st.error(f"Extractor failed: {e}")
             st.stop()
