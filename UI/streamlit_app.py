@@ -267,7 +267,15 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
         try:
             extracted = extract(cleaned, all_speakers, auth.client, deployment)
         except Exception as e:
-            st.error(f"Extractor failed: {e}")
+            if "429" in str(e) or "too_many_requests" in str(e).lower() or "rate" in str(e).lower():
+                st.error(
+                    "**Azure OpenAI rate limit hit** — the deployment's TPM quota is too low "
+                    "for this transcript.\n\n"
+                    "**Fix:** In Azure AI Foundry → your deployment → edit → increase the "
+                    "Tokens per Minute (TPM) quota. A minimum of 40K TPM is recommended."
+                )
+            else:
+                st.error(f"Extractor failed: {e}")
             st.stop()
         st.write(
             f"✅ Extracted — **{len(extracted.get('use_cases', []))}** use cases | "
@@ -279,7 +287,15 @@ if st.button("🚀 Generate BRD", type="primary", use_container_width=True):
         try:
             brd = generate(extracted, auth.client, deployment)
         except Exception as e:
-            st.error(f"Generator failed: {e}")
+            if "429" in str(e) or "too_many_requests" in str(e).lower() or "rate" in str(e).lower():
+                st.error(
+                    "**Azure OpenAI rate limit hit** — the deployment's TPM quota is too low "
+                    "for this transcript.\n\n"
+                    "**Fix:** In Azure AI Foundry → your deployment → edit → increase the "
+                    "Tokens per Minute (TPM) quota. A minimum of 40K TPM is recommended."
+                )
+            else:
+                st.error(f"Generator failed: {e}")
             st.stop()
         st.write("✅ BRD generated")
 
