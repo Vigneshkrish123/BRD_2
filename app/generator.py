@@ -81,8 +81,8 @@ def generate(
             {"role": "system", "content": GENERATION_SYSTEM},
             {"role": "user",   "content": user_message},
         ],
-        temperature=0.1,
-        max_tokens=8000,
+        temperature=0.2,
+        max_tokens=12000,
         response_format={"type": "json_object"},
     )
 
